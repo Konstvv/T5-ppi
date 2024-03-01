@@ -4,6 +4,8 @@ import pandas as pd
 from Bio import SeqIO
 import ankh
 import torch
+from tqdm import tqdm
+
 
 class PairSequenceData(Dataset):
     def __init__(self,
@@ -17,7 +19,10 @@ class PairSequenceData(Dataset):
         self.action_path = actions_file
         self.sequences_path = sequences_file
         self.labels = labels
-        _, self.tokenizer = ankh.load_large_model()
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.ankh_model, self.tokenizer = ankh.load_large_model()
+        self.ankh_model.to(self.device)
 
         dtypes = {'seq1': str, 'seq2': str}
         if self.labels:
@@ -28,36 +33,64 @@ class PairSequenceData(Dataset):
 
         self.sequences = SeqIO.to_dict(SeqIO.parse(self.sequences_path, "fasta"))
 
-        if max_len is not None:
+        if self.max_len is not None:
             self.actions = self.actions[
-                (self.actions["seq1"].apply(lambda x: len(str(self.sequences[x].seq))) <= max_len) &
-                (self.actions["seq2"].apply(lambda x: len(str(self.sequences[x].seq))) <= max_len)
-            ].reset_index(drop=True)
+                (self.actions["seq1"].apply(lambda x: len(str(self.sequences[x].seq))) < self.max_len) &
+                (self.actions["seq2"].apply(lambda x: len(str(self.sequences[x].seq))) < self.max_len)
+                ].reset_index(drop=True)
+            for id in list(self.sequences.keys()):
+                if len(str(self.sequences[id].seq)) >= self.max_len:
+                    del self.sequences[id]
+
+        ids = self.tokenizer.batch_encode_plus([str(self.sequences[x].seq) for x in list(self.sequences.keys())],
+                                               add_special_tokens=True,
+                                               padding="max_length",
+                                               max_length=self.max_len)
+        input_ids = torch.tensor(ids['input_ids']).to(self.device)
+        attention_mask = torch.tensor(ids['attention_mask']).to(self.device)
+
+        batch_size = 32
+        self.actions = self.actions[:len(self.actions) - (len(self.actions) % batch_size)]
+
+        embeddings = torch.tensor([]).to(self.device)
+        for i in tqdm(range(0, len(input_ids), batch_size)):
+            with torch.no_grad():
+                embedding_repr = self.ankh_model(input_ids=input_ids[i:i+batch_size], attention_mask=attention_mask[i:i+batch_size])
+            embeddings = torch.cat((embeddings, embedding_repr.last_hidden_state), dim=0)
+
+        self.embeddings = {}
+        for i, id in enumerate(list(self.sequences.keys())):
+            self.embeddings[id] = embedding_repr.last_hidden_state[i]
 
     def __len__(self):
         return len(self.actions)
 
     def __getitem__(self, idx):
-        id1 = str(self.sequences[self.actions["seq1"][idx]].seq)
-        id2 = str(self.sequences[self.actions["seq2"][idx]].seq)
+        # id1 = str(self.sequences[self.actions["seq1"][idx]].seq)
+        # id2 = str(self.sequences[self.actions["seq2"][idx]].seq)
 
-        ids = self.tokenizer.batch_encode_plus([id1, id2], add_special_tokens=True, padding="longest")
+        emb_0 = self.embeddings[self.actions["seq1"][idx]]
+        emb_1 = self.embeddings[self.actions["seq2"][idx]]
 
         if self.labels:
             label = int(self.actions["label"][idx])
         else:
             label = 0
 
-        return {"input_ids": torch.tensor(ids['input_ids']),
-                'attention_mask': torch.tensor(ids['attention_mask']),
-                "label": label,
-                "lens": [len(id1), len(id2)]}
+        # return {"input_ids": torch.tensor(ids['input_ids']),
+        #         'attention_mask': torch.tensor(ids['attention_mask']),
+        #         "label": label}
+        #         # "lens": torch.tensor([len(id1), len(id2)])}
+
+        return {"emb_0": emb_0,
+                "emb_1": emb_1,
+                "label": label}
 
 
 if __name__ == '__main__':
     data = PairSequenceData(actions_file="../SENSE-PPI/data/guo_yeast_data/protein.pairs.tsv",
                             sequences_file="../SENSE-PPI/data/guo_yeast_data/sequences.fasta",
                             max_len=800)
-    
+
     print(len(data))
-    print(data[0])
+    print(data[0]['input_ids'].shape)

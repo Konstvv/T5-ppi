@@ -81,17 +81,17 @@ class BaselineModel(pl.LightningModule):
         self.valid_metrics.update(preds, trues)
         self.log("val_loss", val_loss, batch_size=self.hparams.batch_size, sync_dist=self.hparams.sync_dist)
 
-    def training_epoch_end(self, outputs) -> None:
+    def on_train_epoch_end(self):
         result = self.train_metrics.compute()
         self.train_metrics.reset()
         self.log_dict(result, on_epoch=True, sync_dist=self.hparams.sync_dist)
 
-    def test_epoch_end(self, outputs) -> None:
+    def on_test_epoch_end(self):
         result = self.test_metrics.compute()
         self.test_metrics.reset()
         self.log_dict(result, on_epoch=True, sync_dist=self.hparams.sync_dist)
 
-    def validation_epoch_end(self, outputs) -> None:
+    def on_validation_epoch_end(self):
         result = self.valid_metrics.compute()
         self.valid_metrics.reset()
         self.log_dict(result, on_epoch=True, sync_dist=self.hparams.sync_dist)
@@ -138,7 +138,7 @@ class BaselineModel(pl.LightningModule):
         parser = parent_parser.add_argument_group("Args_model")
         parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for training. "
                                                                    "Cosine warmup will be applied.")
-        parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training/testing.")
+        parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training/testing.")
         parser.add_argument("--encoder_features", type=int, default=1536,
                             # help="Number of features in the encoder "
                             #      "(Corresponds to the dimentionality of per-token embedding of ESM2 model.) "
@@ -151,13 +151,15 @@ class AttentionModel(BaselineModel):
     def __init__(self, params):
         super(AttentionModel, self).__init__(params)
 
-        self.ankh_model, _ = ankh.load_large_model()
+        # self.ankh_model, _ = ankh.load_large_model()
+        # for param in self.ankh_model.parameters():
+        #     param.requires_grad = False
 
         self.encoder_features = self.hparams.encoder_features
 
         self.dense_head = torch.nn.Sequential(
             torch.nn.Dropout(p=0.5),
-            torch.nn.Linear(self.encoder_features, 32),
+            torch.nn.Linear(self.encoder_features*2, 32),
             torch.nn.ReLU(),
             torch.nn.Dropout(p=0.5),
             torch.nn.Linear(32, 1),
@@ -165,16 +167,14 @@ class AttentionModel(BaselineModel):
         )
 
     def forward(self, batch):
-        # print(batch)
-        # exit()
 
-        with torch.no_grad():
-            embedding_repr = self.ankh_model(input_ids=batch['input_ids'], attention_mask=batch['attention_mask'])
+        # emb1 = self.ankh_model(input_ids=batch['input_ids'][:, 0, :], attention_mask=batch['attention_mask'][:, 0, :]).last_hidden_state
+        # emb2 = self.ankh_model(input_ids=batch['input_ids'][:, 1, :], attention_mask=batch['attention_mask'][:, 1, :]).last_hidden_state
 
-        emb1 = embedding_repr.last_hidden_state[0,:batch['len'][0]]
-        emb2 = embedding_repr.last_hidden_state[1,:batch['len'][1]]
+        head1 = batch['emb_0'].mean(dim=1)
+        head2 = batch['emb_1'].mean(dim=1)
 
-        return self.dense_head(emb1.mean(dim=0) * emb2.mean(dim=0))
+        return self.dense_head(torch.cat([head1, head2], dim=1))
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
@@ -192,7 +192,7 @@ if __name__ == '__main__':
 
     dataset = PairSequenceData(actions_file="../SENSE-PPI/data/guo_yeast_data/protein.pairs.tsv",
                         sequences_file="../SENSE-PPI/data/guo_yeast_data/sequences.fasta",
-                        max_len=200)
+                        max_len=400)
     
     print(len(dataset))
     
