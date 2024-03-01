@@ -60,7 +60,7 @@ class PairSequenceData(Dataset):
 
         self.embeddings = {}
         for i, id in enumerate(list(self.sequences.keys())):
-            self.embeddings[id] = embedding_repr.last_hidden_state[i]
+            self.embeddings[id] = embeddings[i]
 
     def __len__(self):
         return len(self.actions)
