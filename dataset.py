@@ -21,7 +21,7 @@ class PairSequenceData(Dataset):
         self.labels = labels
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.ankh_model, self.tokenizer = ankh.load_large_model()
+        self.ankh_model, self.tokenizer = ankh.load_base_model()
         self.ankh_model.to(self.device)
 
         dtypes = {'seq1': str, 'seq2': str}
@@ -49,7 +49,7 @@ class PairSequenceData(Dataset):
         input_ids = torch.tensor(ids['input_ids']).to(self.device)
         attention_mask = torch.tensor(ids['attention_mask']).to(self.device)
 
-        batch_size = 32
+        batch_size = 8
         self.actions = self.actions[:len(self.actions) - (len(self.actions) % batch_size)]
 
         embeddings = torch.tensor([]).to(self.device)
@@ -93,4 +93,4 @@ if __name__ == '__main__':
                             max_len=800)
 
     print(len(data))
-    print(data[0]['input_ids'].shape)
+    print(data[0]['emb_0'].shape)
