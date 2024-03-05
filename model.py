@@ -42,10 +42,12 @@ class BaselineModel(pl.LightningModule):
         self.test_set = None
 
         # Defining whether to sync the logs or not depending on the number of gpus
-        if hasattr(self.hparams, 'devices') and int(self.hparams.devices) > 1:
-            self.hparams.sync_dist = True
-        else:
-            self.hparams.sync_dist = False
+        self.hparams.sync_dist = False
+        # mandatory check that self.hparams has devices attribute and if it is not NoneType then is is > 1
+        if hasattr(self.hparams, 'devices'):
+            if self.hparams.devices is not None and int(self.hparams.devices) > 1:
+                print('Using distributed training with {} gpus'.format(self.hparams.devices))
+                self.hparams.sync_dist = True
 
         self.valid_metrics = MetricCollection([
             Accuracy(task="binary"),
@@ -139,7 +141,8 @@ class BaselineModel(pl.LightningModule):
         parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for training. "
                                                                    "Cosine warmup will be applied.")
         parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training/testing.")
-        parser.add_argument("--encoder_features", type=int, default=1536,
+        parser.add_argument("--max_len", type=int, default=800, help="Max sequence length.")
+        parser.add_argument("--encoder_features", type=int, default=768,
                             # help="Number of features in the encoder "
                             #      "(Corresponds to the dimentionality of per-token embedding of ESM2 model.) "
                             #      "If not a 3B version of ESM2 is chosen, this parameter needs to be set accordingly."
@@ -151,30 +154,49 @@ class AttentionModel(BaselineModel):
     def __init__(self, params):
         super(AttentionModel, self).__init__(params)
 
-        # self.ankh_model, _ = ankh.load_large_model()
-        # for param in self.ankh_model.parameters():
-        #     param.requires_grad = False
+        self.ankh_model, self.ankh_tokenizer = ankh.load_base_model()
+        for param in self.ankh_model.parameters():
+            param.requires_grad = False
 
         self.encoder_features = self.hparams.encoder_features
 
+        self.gru = torch.nn.GRU(input_size=self.encoder_features, hidden_size=128, num_layers=3, batch_first=True,
+                                bidirectional=True)
+
         self.dense_head = torch.nn.Sequential(
-            torch.nn.Dropout(p=0.5),
-            torch.nn.Linear(self.encoder_features*2, 32),
+            # torch.nn.Dropout(p=0.5),
+            torch.nn.Linear(256, 32),
             torch.nn.ReLU(),
-            torch.nn.Dropout(p=0.5),
+            # torch.nn.Dropout(p=0.5),
             torch.nn.Linear(32, 1),
             torch.nn.Sigmoid()
         )
 
+    def ankh_encode(self, batch_seq):
+        ids = self.ankh_tokenizer.batch_encode_plus(batch_seq,
+                                                    add_special_tokens=True,
+                                                    padding="max_length",
+                                                    max_length=self.hparams.max_len)
+        input_ids = torch.tensor(ids['input_ids']).to(self.device)
+        attention_mask = torch.tensor(ids['attention_mask']).to(self.device)
+
+        with torch.no_grad():
+            embedding_repr = self.ankh_model(input_ids=input_ids, attention_mask=attention_mask)
+        return embedding_repr.last_hidden_state
+
+
     def forward(self, batch):
 
-        # emb1 = self.ankh_model(input_ids=batch['input_ids'][:, 0, :], attention_mask=batch['attention_mask'][:, 0, :]).last_hidden_state
-        # emb2 = self.ankh_model(input_ids=batch['input_ids'][:, 1, :], attention_mask=batch['attention_mask'][:, 1, :]).last_hidden_state
+        emb1 = self.ankh_encode(batch["seq1"])
+        emb2 = self.ankh_encode(batch["seq2"])
 
-        head1 = batch['emb_0'].mean(dim=1)
-        head2 = batch['emb_1'].mean(dim=1)
+        # emb1 = emb1.mean(dim=1)
+        # emb2 = emb2.mean(dim=1)
 
-        return self.dense_head(torch.cat([head1, head2], dim=1))
+        emb1 = self.gru(emb1)[0][:, -1, :]
+        emb2 = self.gru(emb2)[0][:, -1, :]
+
+        return self.dense_head(emb1 * emb2)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
@@ -189,16 +211,24 @@ class AttentionModel(BaselineModel):
 if __name__ == '__main__':
     from dataset import PairSequenceData
     from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
+    import os
+    
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+    max_len = 800
 
     dataset = PairSequenceData(actions_file="../SENSE-PPI/data/guo_yeast_data/protein.pairs.tsv",
                         sequences_file="../SENSE-PPI/data/guo_yeast_data/sequences.fasta",
-                        max_len=400)
+                        max_len=max_len)
     
     print(len(dataset))
     
     parser = argparse.ArgumentParser()
     parser = BaselineModel.add_model_specific_args(parser)
+    parser = pl.Trainer.add_argparse_args(parser)
     params = parser.parse_args()
+
+    params.max_len = max_len
 
     model = AttentionModel(params)
 
@@ -209,16 +239,19 @@ if __name__ == '__main__':
     logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
 
     callbacks = [
-        TQDMProgressBar(refresh_rate=50),
+        TQDMProgressBar(),
         ModelCheckpoint(filename='chkpt_loss_based_{epoch}-{val_loss:.3f}-{val_BinaryF1Score:.3f}', verbose=True,
                         monitor='val_loss', mode='min', save_top_k=1),
         EarlyStopping(monitor="val_loss", patience=10,
                                     verbose=False, mode="min")
     ]
 
-    trainer = pl.Trainer(accelerator='gpu', num_nodes=1, max_epochs=100, 
+    torch.set_float32_matmul_precision('medium')
+    trainer = pl.Trainer(accelerator='gpu', num_nodes=params.devices,
+                         max_epochs=100, 
                          logger=logger, callbacks=callbacks)
 
     trainer.fit(model, train_set, val_set)
+
 
     

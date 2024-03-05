@@ -20,10 +20,6 @@ class PairSequenceData(Dataset):
         self.sequences_path = sequences_file
         self.labels = labels
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.ankh_model, self.tokenizer = ankh.load_base_model()
-        self.ankh_model.to(self.device)
-
         dtypes = {'seq1': str, 'seq2': str}
         if self.labels:
             dtypes.update({'label': np.float16})
@@ -42,48 +38,20 @@ class PairSequenceData(Dataset):
                 if len(str(self.sequences[id].seq)) >= self.max_len:
                     del self.sequences[id]
 
-        ids = self.tokenizer.batch_encode_plus([str(self.sequences[x].seq) for x in list(self.sequences.keys())],
-                                               add_special_tokens=True,
-                                               padding="max_length",
-                                               max_length=self.max_len)
-        input_ids = torch.tensor(ids['input_ids']).to(self.device)
-        attention_mask = torch.tensor(ids['attention_mask']).to(self.device)
-
-        batch_size = 8
-        self.actions = self.actions[:len(self.actions) - (len(self.actions) % batch_size)]
-
-        embeddings = torch.tensor([]).to(self.device)
-        for i in tqdm(range(0, len(input_ids), batch_size)):
-            with torch.no_grad():
-                embedding_repr = self.ankh_model(input_ids=input_ids[i:i+batch_size], attention_mask=attention_mask[i:i+batch_size])
-            embeddings = torch.cat((embeddings, embedding_repr.last_hidden_state), dim=0)
-
-        self.embeddings = {}
-        for i, id in enumerate(list(self.sequences.keys())):
-            self.embeddings[id] = embeddings[i]
-
     def __len__(self):
         return len(self.actions)
 
     def __getitem__(self, idx):
-        # id1 = str(self.sequences[self.actions["seq1"][idx]].seq)
-        # id2 = str(self.sequences[self.actions["seq2"][idx]].seq)
-
-        emb_0 = self.embeddings[self.actions["seq1"][idx]]
-        emb_1 = self.embeddings[self.actions["seq2"][idx]]
+        id1 = str(self.sequences[self.actions["seq1"][idx]].seq)
+        id2 = str(self.sequences[self.actions["seq2"][idx]].seq)
 
         if self.labels:
             label = int(self.actions["label"][idx])
         else:
             label = 0
 
-        # return {"input_ids": torch.tensor(ids['input_ids']),
-        #         'attention_mask': torch.tensor(ids['attention_mask']),
-        #         "label": label}
-        #         # "lens": torch.tensor([len(id1), len(id2)])}
-
-        return {"emb_0": emb_0,
-                "emb_1": emb_1,
+        return {"seq1": id1,
+                "seq2": id2,
                 "label": label}
 
 
@@ -93,4 +61,4 @@ if __name__ == '__main__':
                             max_len=800)
 
     print(len(data))
-    print(data[0]['emb_0'].shape)
+    print(data[0])
