@@ -9,7 +9,9 @@ from torchmetrics import AUROC, Accuracy, Precision, Recall, F1Score, MatthewsCo
 from torchmetrics.collections import MetricCollection
 import torch.optim as optim
 import numpy as np
+from transformers import AutoTokenizer
 import ankh
+
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
 
@@ -142,65 +144,125 @@ class BaselineModel(pl.LightningModule):
                                                                    "Cosine warmup will be applied.")
         parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training/testing.")
         parser.add_argument("--max_len", type=int, default=800, help="Max sequence length.")
-        parser.add_argument("--encoder_features", type=int, default=768,
-                            # help="Number of features in the encoder "
-                            #      "(Corresponds to the dimentionality of per-token embedding of ESM2 model.) "
-                            #      "If not a 3B version of ESM2 is chosen, this parameter needs to be set accordingly."
-                            help=argparse.SUPPRESS)
+        # parser.add_argument("--encoder_features", type=int, default=768,
+        #                     # help="Number of features in the encoder "
+        #                     #      "(Corresponds to the dimentionality of per-token embedding of ESM2 model.) "
+        #                     #      "If not a 3B version of ESM2 is chosen, this parameter needs to be set accordingly."
+        #                     help=argparse.SUPPRESS)
         return parent_parser
 
+
+class CrossAttentionModule(pl.LightningModule):
+    def __init__(self, embed_dim, num_heads):
+        super().__init__()
+        self.self_attention1 = torch.nn.MultiheadAttention(embed_dim, num_heads)
+        self.self_attention2 = torch.nn.MultiheadAttention(embed_dim, num_heads)
+        self.cross_attention1 = torch.nn.MultiheadAttention(embed_dim, num_heads)
+        self.cross_attention2 = torch.nn.MultiheadAttention(embed_dim, num_heads)
+
+    def forward(self, h1, h2):
+        attn1, _ = self.self_attention1(h1, h1, h1)
+        attn2, _ = self.self_attention2(h2, h2, h2)
+        x1 = h1 + attn1
+        x2 = h2 + attn2
+
+        cross_attn1, _ = self.cross_attention1(x1, h2, h2)
+        cross_attn2, _ = self.cross_attention2(x2, h1, h1)
+        cross1 = x1 + cross_attn1
+        cross2 = x2 + cross_attn2
+        return cross1 + cross2
+
+
+class PositionwiseFeedForward(pl.LightningModule):
+    def __init__(self, embed_dim, hidden_dim, dropout_p):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(embed_dim, hidden_dim)
+        self.fc2 = torch.nn.Linear(hidden_dim, embed_dim)
+        self.dropout = torch.nn.Dropout(dropout_p)
+
+    def forward(self, x):
+        x = self.dropout(F.relu(self.fc1(x)))
+        x = self.fc2(x)
+        return x
+
+
+class SelfTransformerBlock(pl.LightningModule):
+    def __init__(self, embed_dim, num_heads, hidden_dim, dropout_p):
+        super().__init__()
+        self.norm1 = torch.nn.LayerNorm(embed_dim)
+        self.norm2 = torch.nn.LayerNorm(embed_dim)
+        self.attn = torch.nn.MultiheadAttention(embed_dim, num_heads)
+        self.ffn = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
+
+    def forward(self, x):
+        attn, _ = self.attn(x, x, x)
+        x = self.norm1(x + attn)
+        x = self.norm2(x + self.ffn(x))
+        return x
+
+
+class CrossTransformerBlock(pl.LightningModule):
+    def __init__(self, embed_dim, num_heads, hidden_dim, dropout_p):
+        super().__init__()
+        self.norm1 = torch.nn.LayerNorm(embed_dim)
+        self.norm2 = torch.nn.LayerNorm(embed_dim)
+        self.attn = CrossAttentionModule(embed_dim, num_heads)
+        self.ffn = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
+
+    def forward(self, x1, x2):
+        x = self.norm1(self.attn(x1, x2))
+        x = self.norm2(x + self.ffn(x))
+        return x
+
+
+class PositionalEncoding(pl.LightningModule):
+    def __init__(self, embed_dim, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, embed_dim)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-torch.log(torch.tensor(10000.0)) / embed_dim))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:x.size(0), :]
+        return x
 
 class AttentionModel(BaselineModel):
     def __init__(self, params):
         super(AttentionModel, self).__init__(params)
 
-        self.ankh_model, self.ankh_tokenizer = ankh.load_base_model()
-        for param in self.ankh_model.parameters():
-            param.requires_grad = False
+        self.tokenizer = AutoTokenizer.from_pretrained("ElnaggarLab/ankh2-large")
 
-        self.encoder_features = self.hparams.encoder_features
-
-        self.gru = torch.nn.GRU(input_size=self.encoder_features, hidden_size=128, num_layers=3, batch_first=True,
-                                bidirectional=True)
+        self.positional_encoding = PositionalEncoding(params.max_len, max_len=params.max_len)
+        self.transformer_blocks = torch.nn.Sequential(*[SelfTransformerBlock(params.max_len, 8, 2048, 0.1) for _ in range(3)])
+        self.cross_transformer_block = CrossTransformerBlock(params.max_len, 8, 2048, 0.1)
 
         self.dense_head = torch.nn.Sequential(
-            # torch.nn.Dropout(p=0.5),
-            torch.nn.Linear(256, 32),
+            torch.nn.Dropout(p=0.2),
+            torch.nn.Linear(params.max_len, 32),
             torch.nn.ReLU(),
-            # torch.nn.Dropout(p=0.5),
+            torch.nn.Dropout(p=0.2),
             torch.nn.Linear(32, 1),
             torch.nn.Sigmoid()
         )
 
-    def ankh_encode(self, batch_seq):
-        ids = self.ankh_tokenizer.batch_encode_plus(batch_seq,
-                                                    add_special_tokens=True,
-                                                    padding="max_length",
-                                                    max_length=self.hparams.max_len)
-        input_ids = torch.tensor(ids['input_ids']).to(self.device)
-        attention_mask = torch.tensor(ids['attention_mask']).to(self.device)
-
-        with torch.no_grad():
-            embedding_repr = self.ankh_model(input_ids=input_ids, attention_mask=attention_mask)
-        return embedding_repr.last_hidden_state
-
-
     def forward(self, batch):
+        tok1 = self.tokenizer(batch["seq1"], padding="max_length", max_length=self.hparams.max_len, return_tensors="pt")
+        tok2 = self.tokenizer(batch["seq2"], padding="max_length", max_length=self.hparams.max_len, return_tensors="pt")
 
-        emb1 = self.ankh_encode(batch["seq1"])
-        emb2 = self.ankh_encode(batch["seq2"])
+        x1 = self.positional_encoding(self.transformer_blocks(tok1["input_ids"].unsqueeze(0).to(torch.float32)))
+        x2 = self.positional_encoding(self.transformer_blocks(tok2["input_ids"].unsqueeze(0).to(torch.float32)))
 
-        # emb1 = emb1.mean(dim=1)
-        # emb2 = emb2.mean(dim=1)
-
-        emb1 = self.gru(emb1)[0][:, -1, :]
-        emb2 = self.gru(emb2)[0][:, -1, :]
-
-        return self.dense_head(emb1 * emb2)
+        x = self.cross_transformer_block(x1, x2)
+        x = self.dense_head(x)
+        return x
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
-        # optimizer = torch.optim.RAdam(self.parameters(), lr=self.hparams.lr)
+
         lr_dict = {
             "scheduler": CosineWarmupScheduler(optimizer=optimizer, warmup=5, max_iters=200),
             "name": 'CosineWarmupScheduler',
@@ -212,20 +274,20 @@ if __name__ == '__main__':
     from dataset import PairSequenceData
     from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
     import os
-    
+
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    max_len = 800
+    max_len = 400
 
     dataset = PairSequenceData(actions_file="../SENSE-PPI/data/guo_yeast_data/protein.pairs.tsv",
-                        sequences_file="../SENSE-PPI/data/guo_yeast_data/sequences.fasta",
-                        max_len=max_len)
-    
+                               sequences_file="../SENSE-PPI/data/guo_yeast_data/sequences.fasta",
+                               max_len=max_len)
+
     print(len(dataset))
-    
+
     parser = argparse.ArgumentParser()
     parser = BaselineModel.add_model_specific_args(parser)
-    parser = pl.Trainer.add_argparse_args(parser)
+    # parser = pl.Trainer.add_argparse_args(parser)
     params = parser.parse_args()
 
     params.max_len = max_len
@@ -243,15 +305,12 @@ if __name__ == '__main__':
         ModelCheckpoint(filename='chkpt_loss_based_{epoch}-{val_loss:.3f}-{val_BinaryF1Score:.3f}', verbose=True,
                         monitor='val_loss', mode='min', save_top_k=1),
         EarlyStopping(monitor="val_loss", patience=10,
-                                    verbose=False, mode="min")
+                      verbose=False, mode="min")
     ]
 
     torch.set_float32_matmul_precision('medium')
-    trainer = pl.Trainer(accelerator='gpu', num_nodes=params.devices,
-                         max_epochs=100, 
+    trainer = pl.Trainer(accelerator='cpu', num_nodes=1, #params.devices,
+                         max_epochs=100,
                          logger=logger, callbacks=callbacks)
 
     trainer.fit(model, train_set, val_set)
-
-
-    
