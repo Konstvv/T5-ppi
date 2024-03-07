@@ -9,8 +9,7 @@ from torchmetrics import AUROC, Accuracy, Precision, Recall, F1Score, MatthewsCo
 from torchmetrics.collections import MetricCollection
 import torch.optim as optim
 import numpy as np
-from transformers import AutoTokenizer
-import ankh
+from transformers import PreTrainedTokenizer, AutoTokenizer
 
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
@@ -230,11 +229,12 @@ class PositionalEncoding(pl.LightningModule):
         x = x + self.pe[:x.size(0), :]
         return x
 
+
 class AttentionModel(BaselineModel):
     def __init__(self, params):
         super(AttentionModel, self).__init__(params)
 
-        self.tokenizer = AutoTokenizer.from_pretrained("ElnaggarLab/ankh2-large")
+        self.tokenizer = PPITokenizer()
 
         self.positional_encoding = PositionalEncoding(params.max_len, max_len=params.max_len)
         self.transformer_blocks = torch.nn.Sequential(*[SelfTransformerBlock(params.max_len, 8, 2048, 0.1) for _ in range(3)])
@@ -269,10 +269,53 @@ class AttentionModel(BaselineModel):
         }
         return [optimizer], [lr_dict]
 
+class PPITokenizer(PreTrainedTokenizer):
+    def __init__(self):
+        with open("vocab.txt", "r") as f:
+            self.vocab = {word.strip(): i for i, word in enumerate(f.readlines())}
+
+        bos_token = "[CLS]"
+        eos_token = "[SEP]"
+        unk_token = "[UNK]"
+        pad_token = "[PAD]"
+        sep_token = "[SEP]"
+        cls_token = "[CLS]"
+        mask_token = "[MASK]"
+
+        super().__init__(
+            vocab=self.vocab,
+            bos_token=bos_token,
+            eos_token=eos_token,
+            unk_token=unk_token,
+            pad_token=pad_token,
+            sep_token=sep_token,
+            cls_token=cls_token,
+            mask_token=mask_token,
+        )
+
+        self.pre_tokenizer_split = lambda text: self.preprocess_text(text)
+        self.do_lower_case = False
+        self.tokenize = lambda text: [token for token in text]
+        self.convert_tokens_to_ids = lambda tokens: [self.vocab[token] for token in tokens]
+        self.convert_ids_to_tokens = lambda ids: [list(self.vocab.keys())[i] for i in ids]
+        self.get_vocab = lambda: self.vocab
+
+    def get_vocab(self):
+        return self.vocab
+
+    @staticmethod
+    def preprocess_text(text):
+        # Convert all letters to uppercase
+        text = text.upper()
+        # Remove any extra whitespace
+        text = text.replace('\n', '').replace('\t', '').replace('\r', '')
+        return text
+
 
 if __name__ == '__main__':
     from dataset import PairSequenceData
     from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
+    from torchsummary import summary
     import os
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -293,6 +336,8 @@ if __name__ == '__main__':
     params.max_len = max_len
 
     model = AttentionModel(params)
+
+    # print(summary(model, (max_len)))
 
     model.load_data(dataset=dataset, valid_size=0.2)
     train_set = model.train_dataloader()
