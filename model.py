@@ -1,4 +1,6 @@
 import argparse
+from typing import List
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -10,6 +12,7 @@ from torchmetrics.collections import MetricCollection
 import torch.optim as optim
 import numpy as np
 from transformers import PreTrainedTokenizer, AutoTokenizer
+from tokenizers import Tokenizer, normalizers, pre_tokenizers, decoders, trainers, processors, models
 
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
@@ -139,9 +142,9 @@ class BaselineModel(pl.LightningModule):
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group("Args_model")
-        parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for training. "
+        parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate for training. "
                                                                    "Cosine warmup will be applied.")
-        parser.add_argument("--batch_size", type=int, default=2, help="Batch size for training/testing.")
+        parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training/testing.")
         parser.add_argument("--max_len", type=int, default=800, help="Max sequence length.")
         # parser.add_argument("--encoder_features", type=int, default=768,
         #                     # help="Number of features in the encoder "
@@ -234,27 +237,41 @@ class AttentionModel(BaselineModel):
     def __init__(self, params):
         super(AttentionModel, self).__init__(params)
 
-        self.tokenizer = PPITokenizer()
+        self.tokenizer = create_tokenizer()#Tokenizer.from_file("tokenizer.json")
 
         self.positional_encoding = PositionalEncoding(params.max_len, max_len=params.max_len)
         self.transformer_blocks = torch.nn.Sequential(*[SelfTransformerBlock(params.max_len, 8, 2048, 0.1) for _ in range(3)])
         self.cross_transformer_block = CrossTransformerBlock(params.max_len, 8, 2048, 0.1)
 
         self.dense_head = torch.nn.Sequential(
-            torch.nn.Dropout(p=0.2),
-            torch.nn.Linear(params.max_len, 32),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(p=0.2),
-            torch.nn.Linear(32, 1),
+            # torch.nn.Dropout(p=0.2),
+            # torch.nn.Linear(params.max_len, 32),
+            # torch.nn.ReLU(),
+            torch.nn.Dropout(p=0.1),
+            torch.nn.Linear(params.max_len, 1),
             torch.nn.Sigmoid()
         )
 
-    def forward(self, batch):
-        tok1 = self.tokenizer(batch["seq1"], padding="max_length", max_length=self.hparams.max_len, return_tensors="pt")
-        tok2 = self.tokenizer(batch["seq2"], padding="max_length", max_length=self.hparams.max_len, return_tensors="pt")
+    def batch_encode(self, seqs: List[str], max_length=None):
+        ids = [encoding.ids for encoding in self.tokenizer.encode_batch(seqs)]
 
-        x1 = self.positional_encoding(self.transformer_blocks(tok1["input_ids"].unsqueeze(0).to(torch.float32)))
-        x2 = self.positional_encoding(self.transformer_blocks(tok2["input_ids"].unsqueeze(0).to(torch.float32)))
+        if max_length is None:
+            max_length = max(len(id) for id in ids)
+
+        pad_id = self.tokenizer.token_to_id("[PAD]")
+
+        # convert every id to a tensor and pad it to max_length, output a concatenated tensor
+        return torch.cat([F.pad(torch.tensor(id), (0, max_length - len(id)), value=pad_id).unsqueeze(0) for id in ids])
+
+    def forward(self, batch):
+        # tok1 = self.tokenizer(batch["seq1"], padding="max_length", max_length=self.hparams.max_len, return_tensors="pt")
+        # tok2 = self.tokenizer(batch["seq2"], padding="max_length", max_length=self.hparams.max_len, return_tensors="pt")
+
+        tok1 = self.batch_encode(batch["seq1"], max_length=self.hparams.max_len).to(params.accelerator)
+        tok2 = self.batch_encode(batch["seq2"], max_length=self.hparams.max_len).to(params.accelerator)
+
+        x1 = self.positional_encoding(self.transformer_blocks(tok1.unsqueeze(0).to(torch.float32)))
+        x2 = self.positional_encoding(self.transformer_blocks(tok2.unsqueeze(0).to(torch.float32)))
 
         x = self.cross_transformer_block(x1, x2)
         x = self.dense_head(x)
@@ -269,47 +286,18 @@ class AttentionModel(BaselineModel):
         }
         return [optimizer], [lr_dict]
 
-class PPITokenizer(PreTrainedTokenizer):
-    def __init__(self):
-        with open("vocab.txt", "r") as f:
-            self.vocab = {word.strip(): i for i, word in enumerate(f.readlines())}
+def create_tokenizer():
+        vocab = [text.strip() for text in open("vocab.txt").readlines()]
 
-        bos_token = "[CLS]"
-        eos_token = "[SEP]"
-        unk_token = "[UNK]"
-        pad_token = "[PAD]"
-        sep_token = "[SEP]"
-        cls_token = "[CLS]"
-        mask_token = "[MASK]"
-
-        super().__init__(
-            vocab=self.vocab,
-            bos_token=bos_token,
-            eos_token=eos_token,
-            unk_token=unk_token,
-            pad_token=pad_token,
-            sep_token=sep_token,
-            cls_token=cls_token,
-            mask_token=mask_token,
-        )
-
-        self.pre_tokenizer_split = lambda text: self.preprocess_text(text)
-        self.do_lower_case = False
-        self.tokenize = lambda text: [token for token in text]
-        self.convert_tokens_to_ids = lambda tokens: [self.vocab[token] for token in tokens]
-        self.convert_ids_to_tokens = lambda ids: [list(self.vocab.keys())[i] for i in ids]
-        self.get_vocab = lambda: self.vocab
-
-    def get_vocab(self):
-        return self.vocab
-
-    @staticmethod
-    def preprocess_text(text):
-        # Convert all letters to uppercase
-        text = text.upper()
-        # Remove any extra whitespace
-        text = text.replace('\n', '').replace('\t', '').replace('\r', '')
-        return text
+        tokenizer = Tokenizer(models.BPE())
+        tokenizer.add_tokens(vocab)
+        tokenizer.unk_token = "[UNK]"
+        tokenizer.normalizer = normalizers.Sequence([normalizers.Strip(),
+                                               normalizers.Replace("\n", "")])
+        tokenizer.pre_tokenizer = pre_tokenizers.Sequence([pre_tokenizers.ByteLevel()])
+        tokenizer.decoder = decoders.ByteLevel()
+        tokenizer.save("tokenizer.json")
+        return tokenizer
 
 
 if __name__ == '__main__':
@@ -318,12 +306,19 @@ if __name__ == '__main__':
     from torchsummary import summary
     import os
 
+    # seqs = ("MA...DANJ\nVWECJJJJJJJJJJ:OIWW", "FUEOW:F\nE&&G")
+    # tokenizer = Tokenizer.from_file("tokenizer.json")
+    # print(tokenizer.encode(seqs[0]).ids)
+    # print()
+    # print(tokenizer.decode_batch([enc.ids for enc in tokenizer.encode_batch(seqs)]))
+    # exit()
+
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    max_len = 400
+    max_len = 800
 
-    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/guo_yeast_data/protein.pairs.tsv",
-                               sequences_file="../SENSE-PPI/data/guo_yeast_data/sequences.fasta",
+    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
+                               sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
                                max_len=max_len)
 
     print(len(dataset))
@@ -334,6 +329,8 @@ if __name__ == '__main__':
     params = parser.parse_args()
 
     params.max_len = max_len
+    params.devices = 1
+    params.accelerator = "cuda"
 
     model = AttentionModel(params)
 
@@ -354,7 +351,7 @@ if __name__ == '__main__':
     ]
 
     torch.set_float32_matmul_precision('medium')
-    trainer = pl.Trainer(accelerator='cpu', num_nodes=1, #params.devices,
+    trainer = pl.Trainer(accelerator=params.accelerator, num_nodes=params.devices,
                          max_epochs=100,
                          logger=logger, callbacks=callbacks)
 
