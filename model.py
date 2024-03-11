@@ -117,7 +117,7 @@ class BaselineModel(pl.LightningModule):
             print('Data has been divided into train/val sets with sizes {} and {} based on selected indices'.format(
                 len(self.train_set), len(self.val_set)))
 
-    def train_dataloader(self, train_set=None, num_workers=8):
+    def train_dataloader(self, train_set=None, num_workers=16):
         if train_set is not None:
             self.train_set = train_set
         return DataLoader(dataset=self.train_set,
@@ -125,14 +125,14 @@ class BaselineModel(pl.LightningModule):
                           num_workers=num_workers,
                           shuffle=True)
 
-    def test_dataloader(self, test_set=None, num_workers=8):
+    def test_dataloader(self, test_set=None, num_workers=16):
         if test_set is not None:
             self.test_set = test_set
         return DataLoader(dataset=self.test_set,
                           batch_size=self.hparams.batch_size,
                           num_workers=num_workers)
 
-    def val_dataloader(self, val_set=None, num_workers=8):
+    def val_dataloader(self, val_set=None, num_workers=16):
         if val_set is not None:
             self.val_set = val_set
         return DataLoader(dataset=self.val_set,
@@ -172,7 +172,7 @@ class CrossAttentionModule(pl.LightningModule):
         cross_attn2, _ = self.cross_attention2(x2, h1, h1)
         cross1 = x1 + cross_attn1
         cross2 = x2 + cross_attn2
-        return cross1 + cross2
+        return cross1, cross2
 
 
 class PositionwiseFeedForward(pl.LightningModule):
@@ -204,17 +204,36 @@ class SelfTransformerBlock(pl.LightningModule):
 
 
 class CrossTransformerBlock(pl.LightningModule):
-    def __init__(self, embed_dim, num_heads, hidden_dim, dropout_p):
+    def __init__(self, embed_dim, num_heads, hidden_dim, dropout_p, merge=False):
         super().__init__()
+        self.merge = merge
         self.norm1 = torch.nn.LayerNorm(embed_dim)
         self.norm2 = torch.nn.LayerNorm(embed_dim)
         self.attn = CrossAttentionModule(embed_dim, num_heads)
-        self.ffn = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
+        self.ffn1 = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
+        if not self.merge:
+            self.norm12 = torch.nn.LayerNorm(embed_dim)
+            self.norm22 = torch.nn.LayerNorm(embed_dim)
+            self.ffn2 = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
 
-    def forward(self, x1, x2):
-        x = self.norm1(self.attn(x1, x2))
-        x = self.norm2(x + self.ffn(x))
-        return x
+    def forward(self, x1, x2, h12_acc=None):
+        h1, h2 = self.attn(x1, x2)
+
+        if h12_acc is not None:
+            h12_acc += h1 + h2
+        else:
+            h12_acc = h1 + h2
+
+        if self.merge:
+            x = self.norm1(h12_acc)
+            x = self.norm2(x + self.ffn1(x))
+            return x
+        else:
+            x1 = self.norm1(x1 + h1)
+            x2 = self.norm2(x2 + h2)
+            x1 = self.norm12(x1 + self.ffn1(x1))
+            x2 = self.norm22(x2 + self.ffn2(x2))
+            return x1, x2, h12_acc
 
 
 class PositionalEncoding(pl.LightningModule):
@@ -240,8 +259,9 @@ class AttentionModel(BaselineModel):
         self.tokenizer = create_tokenizer()#Tokenizer.from_file("tokenizer.json")
 
         self.positional_encoding = PositionalEncoding(params.max_len, max_len=params.max_len)
-        self.transformer_blocks = torch.nn.Sequential(*[SelfTransformerBlock(params.max_len, 8, 2048, 0.1) for _ in range(3)])
-        self.cross_transformer_block = CrossTransformerBlock(params.max_len, 8, 2048, 0.1)
+        self.transformer_blocks = torch.nn.Sequential(*[SelfTransformerBlock(params.max_len, 8, 2048, 0.1) for _ in range(12)])
+        self.cross_transformer_block = CrossTransformerBlock(params.max_len, 8, 2048, 0.1, merge=True)
+
 
         self.dense_head = torch.nn.Sequential(
             # torch.nn.Dropout(p=0.2),
@@ -260,12 +280,9 @@ class AttentionModel(BaselineModel):
 
         pad_id = self.tokenizer.token_to_id("[PAD]")
 
-        # convert every id to a tensor and pad it to max_length, output a concatenated tensor
         return torch.cat([F.pad(torch.tensor(id), (0, max_length - len(id)), value=pad_id).unsqueeze(0) for id in ids])
 
     def forward(self, batch):
-        # tok1 = self.tokenizer(batch["seq1"], padding="max_length", max_length=self.hparams.max_len, return_tensors="pt")
-        # tok2 = self.tokenizer(batch["seq2"], padding="max_length", max_length=self.hparams.max_len, return_tensors="pt")
 
         tok1 = self.batch_encode(batch["seq1"], max_length=self.hparams.max_len).to(params.accelerator)
         tok2 = self.batch_encode(batch["seq2"], max_length=self.hparams.max_len).to(params.accelerator)
@@ -306,13 +323,6 @@ if __name__ == '__main__':
     from torchsummary import summary
     import os
 
-    # seqs = ("MA...DANJ\nVWECJJJJJJJJJJ:OIWW", "FUEOW:F\nE&&G")
-    # tokenizer = Tokenizer.from_file("tokenizer.json")
-    # print(tokenizer.encode(seqs[0]).ids)
-    # print()
-    # print(tokenizer.decode_batch([enc.ids for enc in tokenizer.encode_batch(seqs)]))
-    # exit()
-
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     max_len = 800
@@ -325,11 +335,11 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser = BaselineModel.add_model_specific_args(parser)
-    # parser = pl.Trainer.add_argparse_args(parser)
+    parser = pl.Trainer.add_argparse_args(parser)
     params = parser.parse_args()
 
     params.max_len = max_len
-    params.devices = 1
+    # params.devices = 1
     params.accelerator = "cuda"
 
     model = AttentionModel(params)
@@ -343,7 +353,7 @@ if __name__ == '__main__':
     logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
 
     callbacks = [
-        TQDMProgressBar(),
+        TQDMProgressBar(refresh_rate=50),
         ModelCheckpoint(filename='chkpt_loss_based_{epoch}-{val_loss:.3f}-{val_BinaryF1Score:.3f}', verbose=True,
                         monitor='val_loss', mode='min', save_top_k=1),
         EarlyStopping(monitor="val_loss", patience=10,
@@ -356,3 +366,8 @@ if __name__ == '__main__':
                          logger=logger, callbacks=callbacks)
 
     trainer.fit(model, train_set, val_set)
+
+
+#version 4,8 - 1e-5
+#version 7 - 1e-6
+#version 9 - 1e-4
