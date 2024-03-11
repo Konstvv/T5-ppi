@@ -117,7 +117,7 @@ class BaselineModel(pl.LightningModule):
             print('Data has been divided into train/val sets with sizes {} and {} based on selected indices'.format(
                 len(self.train_set), len(self.val_set)))
 
-    def train_dataloader(self, train_set=None, num_workers=16):
+    def train_dataloader(self, train_set=None, num_workers=8):
         if train_set is not None:
             self.train_set = train_set
         return DataLoader(dataset=self.train_set,
@@ -125,14 +125,14 @@ class BaselineModel(pl.LightningModule):
                           num_workers=num_workers,
                           shuffle=True)
 
-    def test_dataloader(self, test_set=None, num_workers=16):
+    def test_dataloader(self, test_set=None, num_workers=8):
         if test_set is not None:
             self.test_set = test_set
         return DataLoader(dataset=self.test_set,
                           batch_size=self.hparams.batch_size,
                           num_workers=num_workers)
 
-    def val_dataloader(self, val_set=None, num_workers=16):
+    def val_dataloader(self, val_set=None, num_workers=8):
         if val_set is not None:
             self.val_set = val_set
         return DataLoader(dataset=self.val_set,
@@ -256,8 +256,6 @@ class AttentionModel(BaselineModel):
     def __init__(self, params):
         super(AttentionModel, self).__init__(params)
 
-        self.tokenizer = create_tokenizer()#Tokenizer.from_file("tokenizer.json")
-
         self.positional_encoding = PositionalEncoding(params.max_len, max_len=params.max_len)
         self.transformer_blocks = torch.nn.Sequential(*[SelfTransformerBlock(params.max_len, 8, 2048, 0.1) for _ in range(12)])
         self.cross_transformer_block = CrossTransformerBlock(params.max_len, 8, 2048, 0.1, merge=True)
@@ -272,20 +270,10 @@ class AttentionModel(BaselineModel):
             torch.nn.Sigmoid()
         )
 
-    def batch_encode(self, seqs: List[str], max_length=None):
-        ids = [encoding.ids for encoding in self.tokenizer.encode_batch(seqs)]
-
-        if max_length is None:
-            max_length = max(len(id) for id in ids)
-
-        pad_id = self.tokenizer.token_to_id("[PAD]")
-
-        return torch.cat([F.pad(torch.tensor(id), (0, max_length - len(id)), value=pad_id).unsqueeze(0) for id in ids])
-
     def forward(self, batch):
 
-        tok1 = self.batch_encode(batch["seq1"], max_length=self.hparams.max_len).to(params.accelerator)
-        tok2 = self.batch_encode(batch["seq2"], max_length=self.hparams.max_len).to(params.accelerator)
+        tok1 = batch["tok1"]
+        tok2 = batch["tok1"]
 
         x1 = self.positional_encoding(self.transformer_blocks(tok1.unsqueeze(0).to(torch.float32)))
         x2 = self.positional_encoding(self.transformer_blocks(tok2.unsqueeze(0).to(torch.float32)))
@@ -303,19 +291,6 @@ class AttentionModel(BaselineModel):
         }
         return [optimizer], [lr_dict]
 
-def create_tokenizer():
-        vocab = [text.strip() for text in open("vocab.txt").readlines()]
-
-        tokenizer = Tokenizer(models.BPE())
-        tokenizer.add_tokens(vocab)
-        tokenizer.unk_token = "[UNK]"
-        tokenizer.normalizer = normalizers.Sequence([normalizers.Strip(),
-                                               normalizers.Replace("\n", "")])
-        tokenizer.pre_tokenizer = pre_tokenizers.Sequence([pre_tokenizers.ByteLevel()])
-        tokenizer.decoder = decoders.ByteLevel()
-        tokenizer.save("tokenizer.json")
-        return tokenizer
-
 
 if __name__ == '__main__':
     from dataset import PairSequenceData
@@ -327,8 +302,8 @@ if __name__ == '__main__':
 
     max_len = 800
 
-    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
-                               sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
+    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/senseppi_data/protein.pairs_9606.tsv",
+                               sequences_file="../SENSE-PPI/data/senseppi_data/sequences_9606.fasta",
                                max_len=max_len)
 
     print(len(dataset))
@@ -346,7 +321,7 @@ if __name__ == '__main__':
 
     # print(summary(model, (max_len)))
 
-    model.load_data(dataset=dataset, valid_size=0.2)
+    model.load_data(dataset=dataset, valid_size=0.1)
     train_set = model.train_dataloader()
     val_set = model.val_dataloader()
 

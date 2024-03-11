@@ -2,10 +2,22 @@ from torch.utils.data import Dataset
 import numpy as np
 import pandas as pd
 from Bio import SeqIO
-import ankh
 import torch
-from tqdm import tqdm
+import torch.nn.functional as F
+from tokenizers import Tokenizer, normalizers, pre_tokenizers, decoders, trainers, processors, models
 
+def create_tokenizer():
+        vocab = [text.strip() for text in open("vocab.txt").readlines()]
+
+        tokenizer = Tokenizer(models.BPE())
+        tokenizer.add_tokens(vocab)
+        tokenizer.unk_token = "[UNK]"
+        tokenizer.normalizer = normalizers.Sequence([normalizers.Strip(),
+                                               normalizers.Replace("\n", "")])
+        tokenizer.pre_tokenizer = pre_tokenizers.Sequence([pre_tokenizers.ByteLevel()])
+        tokenizer.decoder = decoders.ByteLevel()
+        tokenizer.save("tokenizer.json")
+        return tokenizer
 
 class PairSequenceData(Dataset):
     def __init__(self,
@@ -19,6 +31,8 @@ class PairSequenceData(Dataset):
         self.action_path = actions_file
         self.sequences_path = sequences_file
         self.labels = labels
+
+        self.tokenizer = create_tokenizer()
 
         dtypes = {'seq1': str, 'seq2': str}
         if self.labels:
@@ -50,8 +64,17 @@ class PairSequenceData(Dataset):
         else:
             label = 0
 
-        return {"seq1": id1,
-                "seq2": id2,
+        tok1 = torch.tensor(self.tokenizer.encode(id1).ids)
+        tok2 = torch.tensor(self.tokenizer.encode(id2).ids)
+
+        # Pad to self.max_len
+        pad_token = self.tokenizer.token_to_id("[PAD]")
+        
+        tok1 = F.pad(tok1, (0, self.max_len - len(tok1)), value=pad_token)
+        tok2 = F.pad(tok2, (0, self.max_len - len(tok2)), value=pad_token)
+        
+        return {"tok1": tok1,
+                "id2": tok2,
                 "label": label}
 
 
