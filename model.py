@@ -1,6 +1,4 @@
 import argparse
-from typing import List
-
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -11,8 +9,7 @@ from torchmetrics import AUROC, Accuracy, Precision, Recall, F1Score, MatthewsCo
 from torchmetrics.collections import MetricCollection
 import torch.optim as optim
 import numpy as np
-from transformers import PreTrainedTokenizer, AutoTokenizer
-from tokenizers import Tokenizer, normalizers, pre_tokenizers, decoders, trainers, processors, models
+import math
 
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
@@ -67,8 +64,7 @@ class BaselineModel(pl.LightningModule):
         self.test_metrics = self.valid_metrics.clone(prefix="test_")
 
     def _single_step(self, batch):
-        preds = self.forward(batch)
-        preds = preds.view(-1)
+        preds = self.forward(batch).view(-1)
         loss = F.binary_cross_entropy(preds, batch["label"].to(torch.float32))
         return batch["label"], preds, loss
 
@@ -165,13 +161,13 @@ class CrossAttentionModule(pl.LightningModule):
     def forward(self, h1, h2):
         attn1, _ = self.self_attention1(h1, h1, h1)
         attn2, _ = self.self_attention2(h2, h2, h2)
-        x1 = h1 + attn1
-        x2 = h2 + attn2
+        x1 = torch.add(h1, attn1)
+        x2 = torch.add(h2, attn2)
 
         cross_attn1, _ = self.cross_attention1(x1, h2, h2)
         cross_attn2, _ = self.cross_attention2(x2, h1, h1)
-        cross1 = x1 + cross_attn1
-        cross2 = x2 + cross_attn2
+        cross1 = torch.add(x1, cross_attn1)
+        cross2 = torch.add(x2, cross_attn2)
         return cross1, cross2
 
 
@@ -193,13 +189,18 @@ class SelfTransformerBlock(pl.LightningModule):
         super().__init__()
         self.norm1 = torch.nn.LayerNorm(embed_dim)
         self.norm2 = torch.nn.LayerNorm(embed_dim)
-        self.attn = torch.nn.MultiheadAttention(embed_dim, num_heads)
+        self.attn = torch.nn.MultiheadAttention(embed_dim, num_heads)  # ADD key padding mask
         self.ffn = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
 
-    def forward(self, x):
-        attn, _ = self.attn(x, x, x)
-        x = self.norm1(x + attn)
-        x = self.norm2(x + self.ffn(x))
+    def forward(self, x, need_weights=False):
+        attn, weight = self.attn(x, x, x, need_weights=need_weights)
+        # if need_weights:
+        #     print(weight.shape)
+        #     exit()
+        x = self.norm1(torch.add(x, attn))
+        x = self.norm2(torch.add(x, self.ffn(x)))
+        if need_weights:
+            return x, weight
         return x
 
 
@@ -220,46 +221,51 @@ class CrossTransformerBlock(pl.LightningModule):
         h1, h2 = self.attn(x1, x2)
 
         if h12_acc is not None:
-            h12_acc += h1 + h2
+            h12_acc = torch.add(h12_acc, torch.add(h1, h2))
         else:
-            h12_acc = h1 + h2
+            h12_acc = torch.add(h1, h2)
 
         if self.merge:
             x = self.norm1(h12_acc)
-            x = self.norm2(x + self.ffn1(x))
+            x = self.norm2(torch.add(x, self.ffn1(x)))
             return x
         else:
-            x1 = self.norm1(x1 + h1)
-            x2 = self.norm2(x2 + h2)
-            x1 = self.norm12(x1 + self.ffn1(x1))
-            x2 = self.norm22(x2 + self.ffn2(x2))
+            x1 = self.norm1(torch.add(x1, h1))
+            x2 = self.norm2(torch.add(x2, h2))
+            x1 = self.norm12(torch.add(x1, self.ffn1(x1)))
+            x2 = self.norm22(torch.add(x2, self.ffn2(x2)))
             return x1, x2, h12_acc
 
 
 class PositionalEncoding(pl.LightningModule):
-    def __init__(self, embed_dim, max_len=5000):
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super().__init__()
-        pe = torch.zeros(max_len, embed_dim)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, embed_dim, 2).float() * (-torch.log(torch.tensor(10000.0)) / embed_dim))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.dropout = torch.nn.Dropout(p=dropout)
+
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
         self.register_buffer('pe', pe)
 
     def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
-        return x
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
 
 
 class AttentionModel(BaselineModel):
-    def __init__(self, params):
+    def __init__(self, params, ntoken=32, embed_dim=1024):
         super(AttentionModel, self).__init__(params)
 
-        self.positional_encoding = PositionalEncoding(params.max_len, max_len=params.max_len)
-        self.transformer_blocks = torch.nn.Sequential(*[SelfTransformerBlock(params.max_len, 8, 2048, 0.1) for _ in range(12)])
-        self.cross_transformer_block = CrossTransformerBlock(params.max_len, 8, 2048, 0.1, merge=True)
+        self.embed_dim = embed_dim
 
+        self.embedding = torch.nn.Embedding(ntoken, self.embed_dim)
+        self.positional_encoding = PositionalEncoding(self.embed_dim, max_len=params.max_len)
+        self.transformer_blocks = torch.nn.Sequential(
+            *[SelfTransformerBlock(self.embed_dim, 8, 2048, 0.1) for _ in range(12)])
+        self.cross_transformer_block = CrossTransformerBlock(self.embed_dim, 8, 2048, 0.1, merge=True)
 
         self.dense_head = torch.nn.Sequential(
             # torch.nn.Dropout(p=0.2),
@@ -270,16 +276,26 @@ class AttentionModel(BaselineModel):
             torch.nn.Sigmoid()
         )
 
-    def forward(self, batch):
+    def forward(self, batch, need_weights=False):
 
-        tok1 = batch["tok1"]
-        tok2 = batch["tok1"]
+        x1 = self.embedding(batch["tok1"]['input_ids'].squeeze().transpose(0, 1))
+        x2 = self.embedding(batch["tok2"]['input_ids'].squeeze().transpose(0, 1))
 
-        x1 = self.positional_encoding(self.transformer_blocks(tok1.unsqueeze(0).to(torch.float32)))
-        x2 = self.positional_encoding(self.transformer_blocks(tok2.unsqueeze(0).to(torch.float32)))
+        x1 = self.positional_encoding(x1)
+        x2 = self.positional_encoding(x2)
+
+        for i in range(len(self.transformer_blocks)):
+            if i == len(self.transformer_blocks) - 1 and need_weights:
+                x1, w1 = self.transformer_blocks[i](x1, need_weights=True)
+                x2, w2 = self.transformer_blocks[i](x2, need_weights=True)
+            else:
+                x1 = self.transformer_blocks[i](x1)
+                x2 = self.transformer_blocks[i](x2)
 
         x = self.cross_transformer_block(x1, x2)
-        x = self.dense_head(x)
+        x = self.dense_head(x[:, :, 0].transpose(0, 1))
+        if need_weights:
+            return x, w1, w2
         return x
 
     def configure_optimizers(self):
@@ -291,6 +307,11 @@ class AttentionModel(BaselineModel):
         }
         return [optimizer], [lr_dict]
 
+    @staticmethod
+    def add_model_specific_args(parent_parser):
+        parser = BaselineModel.add_model_specific_args(parent_parser)
+        return parser
+
 
 if __name__ == '__main__':
     from dataset import PairSequenceData
@@ -300,26 +321,34 @@ if __name__ == '__main__':
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    max_len = 800
+    max_len = 400
 
-    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/senseppi_data/protein.pairs_9606.tsv",
-                               sequences_file="../SENSE-PPI/data/senseppi_data/sequences_9606.fasta",
-                               max_len=max_len)
+    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
+                               sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
+                               max_len=max_len-2)
+
+    # dataset_test = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_test.tsv",
+    #                                 sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
+    #                                 max_len=max_len)
 
     print(len(dataset))
 
     parser = argparse.ArgumentParser()
-    parser = BaselineModel.add_model_specific_args(parser)
-    parser = pl.Trainer.add_argparse_args(parser)
+    parser = AttentionModel.add_model_specific_args(parser)
+    # parser = pl.Trainer.add_argparse_args(parser)
     params = parser.parse_args()
 
     params.max_len = max_len
-    # params.devices = 1
-    params.accelerator = "cuda"
+    params.devices = 1
+    params.accelerator = "mps"
 
-    model = AttentionModel(params)
+    model = AttentionModel(params, ntoken=len(dataset.tokenizer), embed_dim=1024)
 
-    # print(summary(model, (max_len)))
+    # ckpt = torch.load("logs/AttentionModelBase/version_0/checkpoints/chkpt_loss_based_epoch=13-val_loss=0.085-val_BinaryF1Score=0.851.ckpt")
+    # model.load_state_dict(ckpt['state_dict'])
+
+    # print(summary(model, (dataset[0]["tok1"]['input_ids'], dataset[0]["tok2"]['input_ids'])))
+    # exit()
 
     model.load_data(dataset=dataset, valid_size=0.1)
     train_set = model.train_dataloader()
@@ -342,7 +371,10 @@ if __name__ == '__main__':
 
     trainer.fit(model, train_set, val_set)
 
+    # pred_loader = DataLoader(dataset=dataset_test, batch_size=32, num_workers=8, shuffle=False)
+    # pred, w1, w2 = model(batch=next(iter(pred_loader)), need_weights=True)
+    # print(w1.shape)
 
-#version 4,8 - 1e-5
-#version 7 - 1e-6
-#version 9 - 1e-4
+# version 4,8 - 1e-5
+# version 7 - 1e-6
+# version 9 - 1e-4
