@@ -264,7 +264,7 @@ class AttentionModel(BaselineModel):
         self.embedding = torch.nn.Embedding(ntoken, self.embed_dim)
         self.positional_encoding = PositionalEncoding(self.embed_dim, max_len=params.max_len)
         self.transformer_blocks = torch.nn.Sequential(
-            *[SelfTransformerBlock(self.embed_dim, 8, 2048, 0.1) for _ in range(12)])
+            *[SelfTransformerBlock(self.embed_dim, 8, 2048, 0.1) for _ in range(6)])
         self.cross_transformer_block = CrossTransformerBlock(self.embed_dim, 8, 2048, 0.1, merge=True)
 
         self.dense_head = torch.nn.Sequential(
@@ -321,7 +321,7 @@ if __name__ == '__main__':
 
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    max_len = 400
+    max_len = 800
 
     dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
                                sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
@@ -335,14 +335,14 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser = AttentionModel.add_model_specific_args(parser)
-    # parser = pl.Trainer.add_argparse_args(parser)
+    parser = pl.Trainer.add_argparse_args(parser)
     params = parser.parse_args()
 
     params.max_len = max_len
-    params.devices = 1
-    params.accelerator = "mps"
+    # params.devices = 1
+    params.accelerator = "gpu"
 
-    model = AttentionModel(params, ntoken=len(dataset.tokenizer), embed_dim=1024)
+    model = AttentionModel(params, ntoken=len(dataset.tokenizer), embed_dim=256)
 
     # ckpt = torch.load("logs/AttentionModelBase/version_0/checkpoints/chkpt_loss_based_epoch=13-val_loss=0.085-val_BinaryF1Score=0.851.ckpt")
     # model.load_state_dict(ckpt['state_dict'])

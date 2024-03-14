@@ -70,11 +70,3 @@ if __name__ == '__main__':
     print(data[0]["tok1"]['input_ids'].shape)
 
 # ADD masks for padding!!!!
-
-# from torchtext.vocab import build_vocab_from_iterator
-#
-# vocab_list = [text.strip() for text in open("vocab.txt").readlines()]
-# vocab = build_vocab_from_iterator(vocab_list, specials=['<unk>'])
-# vocab.set_default_index(vocab['<unk>'])
-#
-# print(len(vocab))
