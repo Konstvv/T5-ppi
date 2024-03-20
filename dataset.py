@@ -53,12 +53,19 @@ class PairSequenceData(Dataset):
         else:
             label = 0
 
-        tok1 = self.tokenizer.encode_plus(id1, return_tensors="pt", padding="max_length", max_length=self.max_len+2)
-        tok2 = self.tokenizer.encode_plus(id2, return_tensors="pt", padding="max_length", max_length=self.max_len+2)
+        return {"seq1": id1,
+                "seq2": id2,
+                "label": label}
+    
+    def collate_fn(self, batch):
+        tok1 = self.tokenizer.batch_encode_plus([x["seq1"] for x in batch], return_tensors="pt", padding="max_length", max_length=self.max_len+2)
+        tok2 = self.tokenizer.batch_encode_plus([x["seq2"] for x in batch], return_tensors="pt", padding="max_length", max_length=self.max_len+2)
+        labels = torch.tensor([x["label"] for x in batch])
 
         return {"tok1": tok1,
                 "tok2": tok2,
-                "label": label}
+                "label": labels}
+
 
 
 if __name__ == '__main__':
@@ -66,7 +73,11 @@ if __name__ == '__main__':
                             sequences_file="../SENSE-PPI/data/guo_yeast_data/sequences.fasta",
                             max_len=800)
 
-    print(len(data))
-    print(data[0]["tok1"]['input_ids'].shape)
+    
+    from torch.utils.data import DataLoader
 
-# ADD masks for padding!!!!
+    loader = DataLoader(dataset=data, batch_size=32, num_workers=1, shuffle=True, collate_fn=data.collate_fn)
+
+    for batch in loader:
+        print(batch)
+        break

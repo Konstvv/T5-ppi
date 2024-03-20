@@ -7,8 +7,8 @@
 #SBATCH --gpus=a100_3g.40gb:4
 #SBATCH --nodes=4
 #SBATCH --mem 128G
-#SBATCH --time=5-10:00:00
-
-export WORLD_SIZE=1
+#SBATCH --time=10-10:00:00
 
 srun python model.py --devices 4
+
+# srun python test.py

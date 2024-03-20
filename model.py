@@ -113,26 +113,29 @@ class BaselineModel(pl.LightningModule):
             print('Data has been divided into train/val sets with sizes {} and {} based on selected indices'.format(
                 len(self.train_set), len(self.val_set)))
 
-    def train_dataloader(self, train_set=None, num_workers=8):
+    def train_dataloader(self, train_set=None, num_workers=8, collate_fn=None):
         if train_set is not None:
             self.train_set = train_set
         return DataLoader(dataset=self.train_set,
                           batch_size=self.hparams.batch_size,
                           num_workers=num_workers,
+                          collate_fn=collate_fn,
                           shuffle=True)
 
-    def test_dataloader(self, test_set=None, num_workers=8):
+    def test_dataloader(self, test_set=None, num_workers=8, collate_fn=None):
         if test_set is not None:
             self.test_set = test_set
         return DataLoader(dataset=self.test_set,
                           batch_size=self.hparams.batch_size,
+                          collate_fn=collate_fn,
                           num_workers=num_workers)
 
-    def val_dataloader(self, val_set=None, num_workers=8):
+    def val_dataloader(self, val_set=None, num_workers=8, collate_fn=None):
         if val_set is not None:
             self.val_set = val_set
         return DataLoader(dataset=self.val_set,
                           batch_size=self.hparams.batch_size,
+                          collate_fn=collate_fn,
                           num_workers=num_workers)
 
     @staticmethod
@@ -149,23 +152,37 @@ class BaselineModel(pl.LightningModule):
         #                     help=argparse.SUPPRESS)
         return parent_parser
 
-
 class CrossAttentionModule(pl.LightningModule):
     def __init__(self, embed_dim, num_heads):
         super().__init__()
+        self.num_heads = num_heads
         self.self_attention1 = torch.nn.MultiheadAttention(embed_dim, num_heads)
         self.self_attention2 = torch.nn.MultiheadAttention(embed_dim, num_heads)
         self.cross_attention1 = torch.nn.MultiheadAttention(embed_dim, num_heads)
         self.cross_attention2 = torch.nn.MultiheadAttention(embed_dim, num_heads)
 
-    def forward(self, h1, h2):
-        attn1, _ = self.self_attention1(h1, h1, h1)
-        attn2, _ = self.self_attention2(h2, h2, h2)
+    # def get_attention_mask(self, mask1, mask2):
+    #     if mask1 is None and mask2 is None:
+    #         attn_mask1 = None
+    #         attn_mask2 = None
+    #     else:
+    #         attn_mask1 = torch.einsum('bi,bj->bij', mask1, mask2)
+    #         attn_mask1 = attn_mask1.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
+    #         attn_mask1 = attn_mask1.reshape(-1, attn_mask1.shape[2], attn_mask1.shape[3]).to(torch.bool)
+    #         attn_mask2 = attn_mask1.transpose(1, 2)
+        
+    #     return attn_mask1, attn_mask2
+
+    def forward(self, h1, h2, key_padding_mask1=None, key_padding_mask2=None):
+        attn1, _ = self.self_attention1(h1, h1, h1, key_padding_mask=key_padding_mask1)
+        attn2, _ = self.self_attention2(h2, h2, h2, key_padding_mask=key_padding_mask2)
         x1 = torch.add(h1, attn1)
         x2 = torch.add(h2, attn2)
 
-        cross_attn1, _ = self.cross_attention1(x1, h2, h2)
-        cross_attn2, _ = self.cross_attention2(x2, h1, h1)
+        # attn_mask1, attn_mask2 = self.get_attention_mask(key_padding_mask1, key_padding_mask2)
+
+        cross_attn1, _ = self.cross_attention1(x1, h2, h2, key_padding_mask=key_padding_mask2)
+        cross_attn2, _ = self.cross_attention2(x2, h1, h1, key_padding_mask=key_padding_mask1)
         cross1 = torch.add(x1, cross_attn1)
         cross2 = torch.add(x2, cross_attn2)
         return cross1, cross2
@@ -192,11 +209,8 @@ class SelfTransformerBlock(pl.LightningModule):
         self.attn = torch.nn.MultiheadAttention(embed_dim, num_heads)  # ADD key padding mask
         self.ffn = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
 
-    def forward(self, x, need_weights=False):
-        attn, weight = self.attn(x, x, x, need_weights=need_weights)
-        # if need_weights:
-        #     print(weight.shape)
-        #     exit()
+    def forward(self, x, key_padding_mask=None, need_weights=False):
+        attn, weight = self.attn(x, x, x, key_padding_mask=key_padding_mask, need_weights=need_weights)
         x = self.norm1(torch.add(x, attn))
         x = self.norm2(torch.add(x, self.ffn(x)))
         if need_weights:
@@ -217,8 +231,8 @@ class CrossTransformerBlock(pl.LightningModule):
             self.norm22 = torch.nn.LayerNorm(embed_dim)
             self.ffn2 = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
 
-    def forward(self, x1, x2, h12_acc=None):
-        h1, h2 = self.attn(x1, x2)
+    def forward(self, x1, x2, h12_acc=None, key_padding_mask1=None, key_padding_mask2=None):
+        h1, h2 = self.attn(x1, x2, key_padding_mask1, key_padding_mask2)
 
         if h12_acc is not None:
             h12_acc = torch.add(h12_acc, torch.add(h1, h2))
@@ -268,15 +282,15 @@ class AttentionModel(BaselineModel):
         self.cross_transformer_block = CrossTransformerBlock(self.embed_dim, 8, 2048, 0.1, merge=True)
 
         self.dense_head = torch.nn.Sequential(
-            # torch.nn.Dropout(p=0.2),
-            # torch.nn.Linear(params.max_len, 32),
-            # torch.nn.ReLU(),
             torch.nn.Dropout(p=0.1),
             torch.nn.Linear(params.max_len, 1),
             torch.nn.Sigmoid()
         )
 
     def forward(self, batch, need_weights=False):
+
+        pad1 = batch["tok1"]['attention_mask'].squeeze().to(torch.float32)
+        pad2 = batch["tok2"]['attention_mask'].squeeze().to(torch.float32)
 
         x1 = self.embedding(batch["tok1"]['input_ids'].squeeze().transpose(0, 1))
         x2 = self.embedding(batch["tok2"]['input_ids'].squeeze().transpose(0, 1))
@@ -286,13 +300,13 @@ class AttentionModel(BaselineModel):
 
         for i in range(len(self.transformer_blocks)):
             if i == len(self.transformer_blocks) - 1 and need_weights:
-                x1, w1 = self.transformer_blocks[i](x1, need_weights=True)
-                x2, w2 = self.transformer_blocks[i](x2, need_weights=True)
+                x1, w1 = self.transformer_blocks[i](x1, key_padding_mask=pad1, need_weights=True)
+                x2, w2 = self.transformer_blocks[i](x2, key_padding_mask=pad2, need_weights=True)
             else:
-                x1 = self.transformer_blocks[i](x1)
-                x2 = self.transformer_blocks[i](x2)
+                x1 = self.transformer_blocks[i](x1, key_padding_mask=pad1)
+                x2 = self.transformer_blocks[i](x2, key_padding_mask=pad2)
 
-        x = self.cross_transformer_block(x1, x2)
+        x = self.cross_transformer_block(x1, x2, key_padding_mask1=pad1, key_padding_mask2=pad2)
         x = self.dense_head(x[:, :, 0].transpose(0, 1))
         if need_weights:
             return x, w1, w2
@@ -319,13 +333,23 @@ if __name__ == '__main__':
     from torchsummary import summary
     import os
 
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    # os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
     max_len = 800
 
-    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
-                               sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
-                               max_len=max_len-2)
+    # dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
+    #                            sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
+    #                            max_len=max_len-2)
+
+    # dataset = PairSequenceData(actions_file="3702_4932_6239_7227_9606_10090_10116_86029_208964_511145.tsv",
+    #                            sequences_file="3702_4932_6239_7227_9606_10090_10116_86029_208964_511145.fasta",
+    #                            max_len=max_len-2)
+
+    dataset = PairSequenceData(actions_file="protein.pairs_custom_balanced.tsv",
+                                sequences_file="sequences_custom.fasta",
+                                max_len=max_len-2)
 
     # dataset_test = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_test.tsv",
     #                                 sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
@@ -351,8 +375,8 @@ if __name__ == '__main__':
     # exit()
 
     model.load_data(dataset=dataset, valid_size=0.1)
-    train_set = model.train_dataloader()
-    val_set = model.val_dataloader()
+    train_set = model.train_dataloader(collate_fn=dataset.collate_fn)
+    val_set = model.val_dataloader(collate_fn=dataset.collate_fn)
 
     logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
 
