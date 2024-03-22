@@ -283,7 +283,7 @@ class AttentionModel(BaselineModel):
 
         self.dense_head = torch.nn.Sequential(
             torch.nn.Dropout(p=0.1),
-            torch.nn.Linear(params.max_len, 1),
+            torch.nn.Linear(embed_dim, 1),
             torch.nn.Sigmoid()
         )
 
@@ -307,7 +307,7 @@ class AttentionModel(BaselineModel):
                 x2 = self.transformer_blocks[i](x2, key_padding_mask=pad2)
 
         x = self.cross_transformer_block(x1, x2, key_padding_mask1=pad1, key_padding_mask2=pad2)
-        x = self.dense_head(x[:, :, 0].transpose(0, 1))
+        x = self.dense_head(x[0].squeeze())
         if need_weights:
             return x, w1, w2
         return x
@@ -339,17 +339,17 @@ if __name__ == '__main__':
 
     max_len = 800
 
-    # dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
-    #                            sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
-    #                            max_len=max_len-2)
+    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
+                               sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
+                               max_len=max_len-2)
 
     # dataset = PairSequenceData(actions_file="3702_4932_6239_7227_9606_10090_10116_86029_208964_511145.tsv",
     #                            sequences_file="3702_4932_6239_7227_9606_10090_10116_86029_208964_511145.fasta",
     #                            max_len=max_len-2)
 
-    dataset = PairSequenceData(actions_file="protein.pairs_custom_balanced.tsv",
-                                sequences_file="sequences_custom.fasta",
-                                max_len=max_len-2)
+    # dataset = PairSequenceData(actions_file="protein.pairs_custom_balanced.tsv",
+    #                             sequences_file="sequences_custom.fasta",
+    #                             max_len=max_len-2)
 
     # dataset_test = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_test.tsv",
     #                                 sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
