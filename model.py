@@ -10,7 +10,7 @@ from torchmetrics.collections import MetricCollection
 import torch.optim as optim
 import numpy as np
 import math
-
+import logging
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
 
@@ -64,9 +64,10 @@ class BaselineModel(pl.LightningModule):
         self.test_metrics = self.valid_metrics.clone(prefix="test_")
 
     def _single_step(self, batch):
+        _, _, labels = batch
         preds = self.forward(batch).view(-1)
-        loss = F.binary_cross_entropy(preds, batch["label"].to(torch.float32))
-        return batch["label"], preds, loss
+        loss = F.binary_cross_entropy(preds, labels.to(torch.float32))
+        return labels, preds, loss
 
     def training_step(self, batch, batch_idx):
         trues, preds, loss = self._single_step(batch)
@@ -98,45 +99,47 @@ class BaselineModel(pl.LightningModule):
         self.valid_metrics.reset()
         self.log_dict(result, on_epoch=True, sync_dist=self.hparams.sync_dist)
 
-    def load_data(self, dataset, valid_size=0.1, indices=None):
-        if indices is None:
-            dataset_length = len(dataset)
-            valid_length = int(valid_size * dataset_length)
-            train_length = dataset_length - valid_length
-            self.train_set, self.val_set = data.random_split(dataset, [train_length, valid_length])
-            print('Data has been randomly divided into train/val sets with sizes {} and {}'.format(len(self.train_set),
-                                                                                                   len(self.val_set)))
-        else:
-            train_indices, val_indices = indices
-            self.train_set = Subset(dataset, train_indices)
-            self.val_set = Subset(dataset, val_indices)
-            print('Data has been divided into train/val sets with sizes {} and {} based on selected indices'.format(
-                len(self.train_set), len(self.val_set)))
+    # def load_data(self, dataset, valid_size=0.1, indices=None):
+    #     if indices is None:
+    #         dataset_length = len(dataset)
+    #         valid_length = int(valid_size * dataset_length)
+    #         train_length = dataset_length - valid_length
+    #         self.train_set, self.val_set = data.random_split(dataset, [train_length, valid_length])
+    #         print('Data has been randomly divided into train/val sets with sizes {} and {}'.format(len(self.train_set),
+    #                                                                                                len(self.val_set)))
+    #     else:
+    #         train_indices, val_indices = indices
+    #         self.train_set = Subset(dataset, train_indices)
+    #         self.val_set = Subset(dataset, val_indices)
+    #         print('Data has been divided into train/val sets with sizes {} and {} based on selected indices'.format(
+    #             len(self.train_set), len(self.val_set)))
 
-    def train_dataloader(self, train_set=None, num_workers=8, collate_fn=None):
+    def train_dataloader(self, train_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if train_set is not None:
             self.train_set = train_set
         return DataLoader(dataset=self.train_set,
                           batch_size=self.hparams.batch_size,
                           num_workers=num_workers,
                           collate_fn=collate_fn,
-                          shuffle=True)
+                          shuffle=shuffle)
 
-    def test_dataloader(self, test_set=None, num_workers=8, collate_fn=None):
+    def test_dataloader(self, test_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if test_set is not None:
             self.test_set = test_set
         return DataLoader(dataset=self.test_set,
                           batch_size=self.hparams.batch_size,
                           collate_fn=collate_fn,
-                          num_workers=num_workers)
+                          num_workers=num_workers,
+                          shuffle=shuffle)
 
-    def val_dataloader(self, val_set=None, num_workers=8, collate_fn=None):
+    def val_dataloader(self, val_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if val_set is not None:
             self.val_set = val_set
         return DataLoader(dataset=self.val_set,
                           batch_size=self.hparams.batch_size,
                           collate_fn=collate_fn,
-                          num_workers=num_workers)
+                          num_workers=num_workers,
+                          shuffle=shuffle)
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -145,6 +148,7 @@ class BaselineModel(pl.LightningModule):
                                                                    "Cosine warmup will be applied.")
         parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training/testing.")
         parser.add_argument("--max_len", type=int, default=800, help="Max sequence length.")
+        parser.add_argument("--num_workers", type=int, default=8, help="Number of workers for data loading.")
         # parser.add_argument("--encoder_features", type=int, default=768,
         #                     # help="Number of features in the encoder "
         #                     #      "(Corresponds to the dimentionality of per-token embedding of ESM2 model.) "
@@ -278,7 +282,7 @@ class AttentionModel(BaselineModel):
         self.embedding = torch.nn.Embedding(ntoken, self.embed_dim)
         self.positional_encoding = PositionalEncoding(self.embed_dim, max_len=params.max_len)
         self.transformer_blocks = torch.nn.Sequential(
-            *[SelfTransformerBlock(self.embed_dim, 8, 2048, 0.1) for _ in range(6)])
+            *[SelfTransformerBlock(self.embed_dim, 8, 2048, 0.1) for _ in range(5)])
         self.cross_transformer_block = CrossTransformerBlock(self.embed_dim, 8, 2048, 0.1, merge=True)
 
         self.dense_head = torch.nn.Sequential(
@@ -288,12 +292,13 @@ class AttentionModel(BaselineModel):
         )
 
     def forward(self, batch, need_weights=False):
+        (input_ids1, attention_mask1), (input_ids2, attention_mask2), _ = batch
 
-        pad1 = batch["tok1"]['attention_mask'].squeeze().to(torch.float32)
-        pad2 = batch["tok2"]['attention_mask'].squeeze().to(torch.float32)
+        pad1 = attention_mask1.squeeze().to(torch.float32)
+        pad2 = attention_mask2.squeeze().to(torch.float32)
 
-        x1 = self.embedding(batch["tok1"]['input_ids'].squeeze().transpose(0, 1))
-        x2 = self.embedding(batch["tok2"]['input_ids'].squeeze().transpose(0, 1))
+        x1 = self.embedding(input_ids1.squeeze().transpose(0, 1))
+        x2 = self.embedding(input_ids2.squeeze().transpose(0, 1))
 
         x1 = self.positional_encoding(x1)
         x2 = self.positional_encoding(x2)
@@ -328,60 +333,38 @@ class AttentionModel(BaselineModel):
 
 
 if __name__ == '__main__':
-    from dataset import PairSequenceData
+    from dataset import PairSequenceData, SequencesDataset
     from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
-    from torchsummary import summary
-    import os
+    logging.basicConfig(level=logging.INFO)
 
-    # os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    # os.environ["TORCH_USE_CUDA_DSA"] = "1"
+    sequences = SequencesDataset(sequences_path="string12.0_experimental_score_500.fasta")
 
-    max_len = 800
+    dataset = PairSequenceData(pairs_path="string12.0_experimental_score_500_train.tsv",
+                                sequences_dataset=sequences)
 
-    dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
-                               sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
-                               max_len=max_len-2)
-
-    # dataset = PairSequenceData(actions_file="3702_4932_6239_7227_9606_10090_10116_86029_208964_511145.tsv",
-    #                            sequences_file="3702_4932_6239_7227_9606_10090_10116_86029_208964_511145.fasta",
-    #                            max_len=max_len-2)
-
-    # dataset = PairSequenceData(actions_file="protein.pairs_custom_balanced.tsv",
-    #                             sequences_file="sequences_custom.fasta",
-    #                             max_len=max_len-2)
-
-    # dataset_test = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_test.tsv",
-    #                                 sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
-    #                                 max_len=max_len)
-
-    print(len(dataset))
+    dataset_test = PairSequenceData(pairs_path="string12.0_experimental_score_500_test.tsv",
+                                    sequences_dataset=sequences)
 
     parser = argparse.ArgumentParser()
     parser = AttentionModel.add_model_specific_args(parser)
     parser = pl.Trainer.add_argparse_args(parser)
     params = parser.parse_args()
 
-    params.max_len = max_len
-    # params.devices = 1
-    params.accelerator = "gpu"
+    params.max_len = dataset.max_len + 2
 
     model = AttentionModel(params, ntoken=len(dataset.tokenizer), embed_dim=256)
 
     # ckpt = torch.load("logs/AttentionModelBase/version_0/checkpoints/chkpt_loss_based_epoch=13-val_loss=0.085-val_BinaryF1Score=0.851.ckpt")
     # model.load_state_dict(ckpt['state_dict'])
 
-    # print(summary(model, (dataset[0]["tok1"]['input_ids'], dataset[0]["tok2"]['input_ids'])))
-    # exit()
-
-    model.load_data(dataset=dataset, valid_size=0.1)
-    train_set = model.train_dataloader(collate_fn=dataset.collate_fn)
-    val_set = model.val_dataloader(collate_fn=dataset.collate_fn)
+    # model.load_data(dataset=dataset, valid_size=0.01)
+    train_set = model.train_dataloader(dataset, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=True)
+    val_set = model.val_dataloader(dataset_test, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=True)
 
     logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
 
     callbacks = [
-        TQDMProgressBar(refresh_rate=50),
+        TQDMProgressBar(refresh_rate=500),
         ModelCheckpoint(filename='chkpt_loss_based_{epoch}-{val_loss:.3f}-{val_BinaryF1Score:.3f}', verbose=True,
                         monitor='val_loss', mode='min', save_top_k=1),
         EarlyStopping(monitor="val_loss", patience=10,
@@ -389,16 +372,16 @@ if __name__ == '__main__':
     ]
 
     torch.set_float32_matmul_precision('medium')
-    trainer = pl.Trainer(accelerator=params.accelerator, num_nodes=params.devices,
+
+    trainer = pl.Trainer(accelerator=params.accelerator, 
+                         num_nodes=params.num_nodes,
+                         strategy=params.strategy,
                          max_epochs=100,
-                         logger=logger, callbacks=callbacks)
+                         logger=logger, 
+                         callbacks=callbacks)
 
     trainer.fit(model, train_set, val_set)
 
     # pred_loader = DataLoader(dataset=dataset_test, batch_size=32, num_workers=8, shuffle=False)
     # pred, w1, w2 = model(batch=next(iter(pred_loader)), need_weights=True)
     # print(w1.shape)
-
-# version 4,8 - 1e-5
-# version 7 - 1e-6
-# version 9 - 1e-4
