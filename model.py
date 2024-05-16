@@ -318,7 +318,7 @@ class AttentionModel(BaselineModel):
         return x
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=0.01)
 
         lr_dict = {
             "scheduler": CosineWarmupScheduler(optimizer=optimizer, warmup=5, max_iters=200),

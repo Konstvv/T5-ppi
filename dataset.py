@@ -7,18 +7,15 @@ from tokenizer import PPITokenizer
 import logging
 
 class SequencesDataset:
-    def __init__(self, 
-                 sequences_path : str, 
-                 max_len=None): 
-        self.max_len = max_len
+    def __init__(self, sequences_path : str): 
+
         self.sequences_path = sequences_path
 
         logging.info(f"Reading sequences from {self.sequences_path}")
         self.sequences = SeqIO.to_dict(SeqIO.parse(self.sequences_path, "fasta"))
 
-        if self.max_len is None:
-            self.max_len = max([len(str(self.sequences[x].seq)) for x in self.sequences])
-            logging.info(f"Max sequence length automatically set to the length of the largest sequence: {self.max_len}")
+        self.max_len = max([len(str(self.sequences[x].seq)) for x in self.sequences])
+        logging.info(f"Max sequence length of the fasta file: {self.max_len}")
 
     def __getitem__(self, idx):
         return self.sequences[idx].seq
@@ -30,7 +27,8 @@ class SequencesDataset:
 class PairSequenceDataBase(Dataset):
     def __init__(self,
                  pairs_path: str,
-                 sequences_dataset: SequencesDataset):
+                 sequences_dataset: SequencesDataset,
+                 max_len: int = None):
 
         super().__init__()
         self.pairs_path = pairs_path
@@ -40,7 +38,11 @@ class PairSequenceDataBase(Dataset):
         self.tokenizer = PPITokenizer()
 
         self.sequences_dataset = sequences_dataset
-        self.max_len = sequences_dataset.max_len
+        
+        if max_len is not None:
+            self.max_len = max_len
+        else:
+            self.max_len = sequences_dataset.max_len
 
     def collate_fn(self, batch):
         id1, id2, labels = zip(*batch)

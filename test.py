@@ -7,46 +7,32 @@ from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from model import AttentionModel
 
-# if __name__ == '__main__':
-#     from dataset import PairSequenceData
-#     from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
-#     import os
-#
-#     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-#
-#     max_len = 800
-#
-#     dataset = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_train.tsv",
-#                                sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
-#                                max_len=max_len-2)
-#
-#     dataset_test = PairSequenceData(actions_file="../SENSE-PPI/data/dscript_data/human_test.tsv",
-#                                     sequences_file="../SENSE-PPI/data/dscript_data/human.fasta",
-#                                     max_len=max_len-2)
-#
-#     parser = argparse.ArgumentParser()
-#     parser = AttentionModel.add_model_specific_args(parser)
-#     parser = pl.Trainer.add_argparse_args(parser)
-#     params = parser.parse_args()
-#
-#     params.max_len = max_len
-#     # params.devices = 1
-#     params.accelerator = "gpu"
-#
-#     model = AttentionModel(params, ntoken=len(dataset.tokenizer), embed_dim=256)
-#
-#     checkpoint_folder = "logs/AttentionModelBase/version_4/checkpoints"
-#     checkpoint_path = os.path.join(checkpoint_folder, os.listdir(checkpoint_folder)[0])
-#     ckpt = torch.load(checkpoint_path)
-#     model.load_state_dict(ckpt['state_dict'])
-#
-#     torch.set_float32_matmul_precision('medium')
-#     trainer = pl.Trainer(accelerator=params.accelerator, num_nodes=params.devices)
-#
-#     pred_loader = DataLoader(dataset=dataset_test, batch_size=32, num_workers=8, shuffle=False)
-#     trainer.test(model, pred_loader)
+from dataset import PairSequenceData, SequencesDataset
+import os
 
-def string_select_data(filter_score=500, min_len=0, max_len=1000):
+
+def test_model(checkpoint_folder, dataset):
+    parser = argparse.ArgumentParser()
+    parser = AttentionModel.add_model_specific_args(parser)
+    parser = pl.Trainer.add_argparse_args(parser)
+    params = parser.parse_args()
+
+    params.max_len = 1002
+
+    model = AttentionModel(params, ntoken=len(dataset.tokenizer), embed_dim=256)
+
+    checkpoint_folder = os.path.join(checkpoint_folder, 'checkpoints')
+    checkpoint_path = os.path.join(checkpoint_folder, os.listdir(checkpoint_folder)[0])
+    ckpt = torch.load(checkpoint_path)
+    model.load_state_dict(ckpt['state_dict'])
+
+    torch.set_float32_matmul_precision('medium')
+    trainer = pl.Trainer(accelerator=params.accelerator, devices=params.devices, num_nodes=params.num_nodes)
+
+    pred_loader = DataLoader(dataset=dataset, batch_size=32, num_workers=8, shuffle=False, collate_fn=dataset.collate_fn)
+    trainer.test(model, pred_loader)
+
+def string_select_data(filter_score=500, min_len=0, max_len=1000, output_name='string12.0_experimental_score_500'):
     import dask.dataframe as dd
     from dask.distributed import Client
     import dask
@@ -66,13 +52,13 @@ def string_select_data(filter_score=500, min_len=0, max_len=1000):
     to_drop = data['protein1'].isin(undesired_prots) | data['protein2'].isin(undesired_prots)
     data = data[~to_drop]
     data = data.compute()
-    data.to_csv('string12.0_experimental_score_500.tsv', index=False, sep=' ')
+    data.to_csv('{}.tsv'.format(output_name), index=False, sep=' ')
 
     left_out_prots = set(data['protein1'].unique()) | set(data['protein2'].unique())
     print('Total of {} proteins written to tsv with a total pair count of {}'.format(len(left_out_prots), len(data)))
     max_written_len = 0
     count_written = 0
-    with open('string12.0_experimental_score_500.fasta', 'w') as f:
+    with open('{}.fasta'.format(output_name), 'w') as f:
         for record in tqdm(all_prots):
             if record.id in left_out_prots:
                 SeqIO.write(record, f, 'fasta')
@@ -118,24 +104,16 @@ def create_negatives_and_split(file):
     data_train.to_csv(file+'_train.tsv', sep='\t', index=False, header=False)
 
 if __name__ == '__main__':
+
     # string_select_data()
-    file = 'string12.0_experimental_score_500'
-    # file = 'string12.0_combined_score_700'
-    create_negatives_and_split(file)
-    # import pandas as pd
-    # from Bio import SeqIO
-    # from tqdm import tqdm
-    #
-    # data = pd.read_csv('string12.0_experimental_score_500_train.tsv', sep='\t', header=None)
-    # proteins_train = set(data[0].unique()) | set(data[1].unique())
-    #
-    # data = pd.read_csv('string12.0_experimental_score_500_test.tsv', sep='\t', header=None)
-    # proteins_test = set(data[0].unique()) | set(data[1].unique())
-    #
-    # with open('string12.0_experimental_score_500_train.fasta', 'w') as f_train:
-    #     with open('string12.0_experimental_score_500_test.fasta', 'w') as f_test:
-    #         for record in tqdm(tqdm(SeqIO.parse('protein.sequences.v12.0.fa', 'fasta'))):
-    #             if record.id in proteins_train:
-    #                 SeqIO.write(record, f_train, 'fasta')
-    #             if record.id in proteins_test:
-    #                 SeqIO.write(record, f_test, 'fasta')
+
+    # file = 'string12.0_experimental_score_500'
+    # # file = 'string12.0_combined_score_700'
+    # create_negatives_and_split(file)
+
+    sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_combined_score_700_experimantal_less_500_sample.fasta")
+
+    dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_combined_score_700_experimantal_less_500_sample.tsv",
+                                sequences_dataset=sequences, max_len=1000)
+    
+    test_model(checkpoint_folder='logs/AttentionModelBase/version_10', dataset=dataset)
