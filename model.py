@@ -1,5 +1,6 @@
 import argparse
 import torch
+import os
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
@@ -11,10 +12,21 @@ import torch.optim as optim
 import numpy as np
 import math
 import logging
+import transformers.models.convbert as c_bert
+from dataset import PairSequenceData, SequencesDataset, PairSequenceDataIterable
+from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
+from tokenizer import PPITokenizer
+import ankh
+
+# from torch.nn import MultiheadAttention
+from rope import RotaryPEMultiHeadAttention as MultiheadAttention
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
 
-    def __init__(self, optimizer, warmup, max_iters):
+    def __init__(self, 
+                 optimizer, 
+                 warmup: int, 
+                 max_iters: int):
         self.warmup = warmup
         self.max_num_iters = max_iters
         super().__init__(optimizer)
@@ -42,14 +54,6 @@ class BaselineModel(pl.LightningModule):
         self.val_set = None
         self.test_set = None
 
-        # Defining whether to sync the logs or not depending on the number of gpus
-        self.hparams.sync_dist = False
-        # mandatory check that self.hparams has devices attribute and if it is not NoneType then is is > 1
-        if hasattr(self.hparams, 'devices'):
-            if self.hparams.devices is not None and int(self.hparams.devices) > 1:
-                print('Using distributed training with {} gpus'.format(self.hparams.devices))
-                self.hparams.sync_dist = True
-
         self.valid_metrics = MetricCollection([
             Accuracy(task="binary"),
             Precision(task="binary"),
@@ -66,6 +70,10 @@ class BaselineModel(pl.LightningModule):
     def _single_step(self, batch):
         _, _, labels = batch
         preds = self.forward(batch).view(-1)
+        
+        # Check range of preds
+        # print(labels, preds)
+        
         loss = F.binary_cross_entropy(preds, labels.to(torch.float32))
         return labels, preds, loss
 
@@ -117,6 +125,11 @@ class BaselineModel(pl.LightningModule):
     def train_dataloader(self, train_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if train_set is not None:
             self.train_set = train_set
+        if isinstance(self.train_set, PairSequenceDataIterable):
+            return DataLoader(dataset=self.train_set,
+                          batch_size=self.hparams.batch_size,
+                          num_workers=num_workers,
+                          collate_fn=collate_fn)
         return DataLoader(dataset=self.train_set,
                           batch_size=self.hparams.batch_size,
                           num_workers=num_workers,
@@ -126,6 +139,11 @@ class BaselineModel(pl.LightningModule):
     def test_dataloader(self, test_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if test_set is not None:
             self.test_set = test_set
+        if isinstance(self.test_set, PairSequenceDataIterable):
+            return DataLoader(dataset=self.test_set,
+                          batch_size=self.hparams.batch_size,
+                          collate_fn=collate_fn,
+                          num_workers=num_workers)
         return DataLoader(dataset=self.test_set,
                           batch_size=self.hparams.batch_size,
                           collate_fn=collate_fn,
@@ -135,6 +153,11 @@ class BaselineModel(pl.LightningModule):
     def val_dataloader(self, val_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if val_set is not None:
             self.val_set = val_set
+        if isinstance(self.val_set, PairSequenceDataIterable):
+            return DataLoader(dataset=self.val_set,
+                          batch_size=self.hparams.batch_size,
+                          collate_fn=collate_fn,
+                          num_workers=num_workers)
         return DataLoader(dataset=self.val_set,
                           batch_size=self.hparams.batch_size,
                           collate_fn=collate_fn,
@@ -144,181 +167,244 @@ class BaselineModel(pl.LightningModule):
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group("Args_model")
-        parser.add_argument("--lr", type=float, default=1e-5, help="Learning rate for training. "
+        parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for training. "
                                                                    "Cosine warmup will be applied.")
         parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training/testing.")
         parser.add_argument("--max_len", type=int, default=800, help="Max sequence length.")
         parser.add_argument("--num_workers", type=int, default=8, help="Number of workers for data loading.")
-        # parser.add_argument("--encoder_features", type=int, default=768,
-        #                     # help="Number of features in the encoder "
-        #                     #      "(Corresponds to the dimentionality of per-token embedding of ESM2 model.) "
-        #                     #      "If not a 3B version of ESM2 is chosen, this parameter needs to be set accordingly."
-        #                     help=argparse.SUPPRESS)
+        parser.add_argument("--sync_dist", type=bool, default=False, help="Synchronize distributed training.")
         return parent_parser
-
-class CrossAttentionModule(pl.LightningModule):
-    def __init__(self, embed_dim, num_heads):
-        super().__init__()
-        self.num_heads = num_heads
-        self.self_attention1 = torch.nn.MultiheadAttention(embed_dim, num_heads)
-        self.self_attention2 = torch.nn.MultiheadAttention(embed_dim, num_heads)
-        self.cross_attention1 = torch.nn.MultiheadAttention(embed_dim, num_heads)
-        self.cross_attention2 = torch.nn.MultiheadAttention(embed_dim, num_heads)
-
-    # def get_attention_mask(self, mask1, mask2):
-    #     if mask1 is None and mask2 is None:
-    #         attn_mask1 = None
-    #         attn_mask2 = None
-    #     else:
-    #         attn_mask1 = torch.einsum('bi,bj->bij', mask1, mask2)
-    #         attn_mask1 = attn_mask1.unsqueeze(1).expand(-1, self.num_heads, -1, -1)
-    #         attn_mask1 = attn_mask1.reshape(-1, attn_mask1.shape[2], attn_mask1.shape[3]).to(torch.bool)
-    #         attn_mask2 = attn_mask1.transpose(1, 2)
-        
-    #     return attn_mask1, attn_mask2
-
-    def forward(self, h1, h2, key_padding_mask1=None, key_padding_mask2=None):
-        attn1, _ = self.self_attention1(h1, h1, h1, key_padding_mask=key_padding_mask1)
-        attn2, _ = self.self_attention2(h2, h2, h2, key_padding_mask=key_padding_mask2)
-        x1 = torch.add(h1, attn1)
-        x2 = torch.add(h2, attn2)
-
-        # attn_mask1, attn_mask2 = self.get_attention_mask(key_padding_mask1, key_padding_mask2)
-
-        cross_attn1, _ = self.cross_attention1(x1, h2, h2, key_padding_mask=key_padding_mask2)
-        cross_attn2, _ = self.cross_attention2(x2, h1, h1, key_padding_mask=key_padding_mask1)
-        cross1 = torch.add(x1, cross_attn1)
-        cross2 = torch.add(x2, cross_attn2)
-        return cross1, cross2
 
 
 class PositionwiseFeedForward(pl.LightningModule):
-    def __init__(self, embed_dim, hidden_dim, dropout_p):
+    def __init__(self, 
+                 input_dim: int, 
+                 hidden_dim: int, 
+                 dropout: float):
         super().__init__()
-        self.fc1 = torch.nn.Linear(embed_dim, hidden_dim)
-        self.fc2 = torch.nn.Linear(hidden_dim, embed_dim)
-        self.dropout = torch.nn.Dropout(dropout_p)
+        self.fc1 = torch.nn.Linear(input_dim, hidden_dim)
+        self.fc2 = torch.nn.Linear(hidden_dim, input_dim)
+        self.gelu = torch.nn.GELU()
+        self.dropout = torch.nn.Dropout(dropout)
 
     def forward(self, x):
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.fc2(x)
+        return self.fc2(self.dropout(self.gelu(self.fc1(x))))
+
+
+class SelfTransformerLayer(pl.LightningModule):
+    def __init__(self, 
+                 input_dim: int, 
+                 num_heads: int, 
+                 hidden_dim: int, 
+                 dropout: float = 0.2):
+        super().__init__()
+        self.norm2 = torch.nn.LayerNorm(input_dim)
+        self.norm3 = torch.nn.LayerNorm(input_dim)
+        self.attn = MultiheadAttention(input_dim, num_heads, dropout)
+        self.ffn = PositionwiseFeedForward(input_dim, hidden_dim, dropout)
+
+    def forward(self, x, mask=None):
+        x_add = torch.add(x, self.attn(x, x, x, mask=mask))
+        x_ffn = self.ffn(self.norm2(x_add))
+        return self.norm3(torch.add(x_ffn, x_add))
+
+
+class CrossTransformerLayer(pl.LightningModule):
+    def __init__(self, 
+                 input_dim: int, 
+                 num_heads: int, 
+                 hidden_dim: int, 
+                 dropout: float = 0.2):
+        super().__init__()
+        self.norm2 = torch.nn.LayerNorm(input_dim)
+        self.norm3 = torch.nn.LayerNorm(input_dim)
+        self.cross_attention = MultiheadAttention(input_dim, num_heads, dropout)
+        self.ffn = PositionwiseFeedForward(input_dim, hidden_dim, dropout)
+
+    def forward(self, x1, x2, masks=None):
+        x1_add = torch.add(x1, self.cross_attention(x1, x2, x2, mask=masks))
+        x2_add = torch.add(x2, self.cross_attention(x2, x1, x1, mask=(masks[1], masks[0])))
+        x1_ffn = self.ffn(self.norm2(x1_add))
+        x2_ffn = self.ffn(self.norm2(x2_add))
+        return self.norm3(torch.add(x1_ffn, x1_add)), self.norm3(torch.add(x2_ffn, x2_add))
+
+
+class SelfTransformerModule(pl.LightningModule):
+    def __init__(self, 
+                 input_dim: int, 
+                 num_heads: int, 
+                 hidden_dim: int, 
+                 dropout: float = 0.2, 
+                 num_layers: int = 1):
+        
+        super().__init__()
+        self.norm = torch.nn.LayerNorm(input_dim)
+
+        self.self_transformer_layers = torch.nn.ModuleList(
+            [SelfTransformerLayer(input_dim, num_heads, hidden_dim, dropout) for _ in range(num_layers)]
+        )
+
+    def forward(self, x, mask=None):
+        x = self.norm(x)
+        if self.self_transformer_layers:
+            for layer in self.self_transformer_layers:
+                x = layer(x, mask)
+
         return x
 
 
-class SelfTransformerBlock(pl.LightningModule):
-    def __init__(self, embed_dim, num_heads, hidden_dim, dropout_p):
+class CrossTransformerModule(pl.LightningModule):
+    def __init__(self, 
+                 input_dim: int, 
+                 num_heads: int, 
+                 hidden_dim: int, 
+                 dropout: float = 0.2, 
+                 num_layers: int = 1,
+                 pooling: str = 'max'):
+        
         super().__init__()
-        self.norm1 = torch.nn.LayerNorm(embed_dim)
-        self.norm2 = torch.nn.LayerNorm(embed_dim)
-        self.attn = torch.nn.MultiheadAttention(embed_dim, num_heads)  # ADD key padding mask
-        self.ffn = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
 
-    def forward(self, x, key_padding_mask=None, need_weights=False):
-        attn, weight = self.attn(x, x, x, key_padding_mask=key_padding_mask, need_weights=need_weights)
-        x = self.norm1(torch.add(x, attn))
-        x = self.norm2(torch.add(x, self.ffn(x)))
-        if need_weights:
-            return x, weight
-        return x
+        self.norm = torch.nn.LayerNorm(input_dim)
 
+        self.cross_transformer_layers = torch.nn.ModuleList(
+            [CrossTransformerLayer(input_dim, num_heads, hidden_dim, dropout) for _ in range(num_layers)]
+        )
 
-class CrossTransformerBlock(pl.LightningModule):
-    def __init__(self, embed_dim, num_heads, hidden_dim, dropout_p, merge=False):
-        super().__init__()
-        self.merge = merge
-        self.norm1 = torch.nn.LayerNorm(embed_dim)
-        self.norm2 = torch.nn.LayerNorm(embed_dim)
-        self.attn = CrossAttentionModule(embed_dim, num_heads)
-        self.ffn1 = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
-        if not self.merge:
-            self.norm12 = torch.nn.LayerNorm(embed_dim)
-            self.norm22 = torch.nn.LayerNorm(embed_dim)
-            self.ffn2 = PositionwiseFeedForward(embed_dim, hidden_dim, dropout_p)
-
-    def forward(self, x1, x2, h12_acc=None, key_padding_mask1=None, key_padding_mask2=None):
-        h1, h2 = self.attn(x1, x2, key_padding_mask1, key_padding_mask2)
-
-        if h12_acc is not None:
-            h12_acc = torch.add(h12_acc, torch.add(h1, h2))
+        if pooling == 'mean':
+            self.pooling = torch.nn.AdaptiveAvgPool1d(1)
+        elif pooling == 'max':
+            self.pooling = torch.nn.AdaptiveMaxPool1d(1)
         else:
-            h12_acc = torch.add(h1, h2)
+            raise ValueError('Supported pooling methods are "mean" and "max"')
 
-        if self.merge:
-            x = self.norm1(h12_acc)
-            x = self.norm2(torch.add(x, self.ffn1(x)))
-            return x
-        else:
-            x1 = self.norm1(torch.add(x1, h1))
-            x2 = self.norm2(torch.add(x2, h2))
-            x1 = self.norm12(torch.add(x1, self.ffn1(x1)))
-            x2 = self.norm22(torch.add(x2, self.ffn2(x2)))
-            return x1, x2, h12_acc
+    def forward(self, x1, x2, masks=None):
+        x1 = self.norm(x1)
+        x2 = self.norm(x2)
+        if self.cross_transformer_layers:
+            for layer in self.cross_transformer_layers:
+                x1, x2 = layer(x1, x2, masks)
+
+        x = torch.cat([x1, x2], dim=1)
+
+        return self.pooling(x.permute(0, 2, 1)).squeeze()
 
 
-class PositionalEncoding(pl.LightningModule):
+# class ConvBertModule(pl.LightningModule):
+#     def __init__(
+#         self,
+#         input_dim: int,
+#         num_heads: int,
+#         hidden_dim: int,
+#         num_hidden_layers: int = 1,
+#         num_layers: int = 1,
+#         kernel_size: int = 9,
+#         dropout: float = 0.2):
 
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+#         super().__init__()
+#         convbert_layers_config = c_bert.ConvBertConfig(
+#             hidden_size=input_dim,
+#             num_attention_heads=num_heads,
+#             intermediate_size=hidden_dim,
+#             conv_kernel_size=kernel_size,
+#             num_hidden_layers=num_hidden_layers,
+#             hidden_dropout_prob=dropout,
+#         )
+
+#         self.convbert_module_list = torch.nn.ModuleList(
+#             [c_bert.ConvBertLayer(convbert_layers_config) for _ in range(num_layers)]
+#         )
+
+#     def forward(self, x):
+#         for layer in self.convbert_module_list:
+#             x = layer(x)[0]
+#         return x
+    
+class AnkhModule(pl.LightningModule):
+    def __init__(self, num_siamese_layers: int):
         super().__init__()
-        self.dropout = torch.nn.Dropout(p=dropout)
+        ankh_model, _ = ankh.load_base_model()
 
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        self.ankh_module = torch.nn.ModuleList()
+        self.embed_tokens = ankh_model.base_model.encoder.embed_tokens
+        for i in range(num_siamese_layers):
+            self.ankh_module.append(ankh_model.base_model.encoder.block[i])
 
     def forward(self, x):
-        x = x + self.pe[:x.size(0)]
-        return self.dropout(x)
+        x = self.embed_tokens(x)
+        for layer in self.ankh_module:
+            x = layer(x)[0]
+        return x
+    
 
-
-class AttentionModel(BaselineModel):
-    def __init__(self, params, ntoken=32, embed_dim=1024):
-        super(AttentionModel, self).__init__(params)
+class PPITransformerModel(BaselineModel):
+    def __init__(self, 
+                 params, 
+                 ntoken: int = 32, 
+                 embed_dim : int = 1024,
+                 hidden_dim: int = 2048,
+                 num_siamese_layers: int = 12,
+                 num_cross_layers: int = 1,
+                 num_heads: int = 8,
+                 dropout: float = 0.2):
+        super(PPITransformerModel, self).__init__(params)
+        
 
         self.embed_dim = embed_dim
 
         self.embedding = torch.nn.Embedding(ntoken, self.embed_dim)
-        self.positional_encoding = PositionalEncoding(self.embed_dim, max_len=params.max_len)
-        self.transformer_blocks = torch.nn.Sequential(
-            *[SelfTransformerBlock(self.embed_dim, 8, 2048, 0.1) for _ in range(5)])
-        self.cross_transformer_block = CrossTransformerBlock(self.embed_dim, 8, 2048, 0.1, merge=True)
+        
+        # self.self_transformer_block = ConvBertModule(input_dim=self.embed_dim, 
+        #                                      num_heads=num_heads, 
+        #                                      hidden_dim=hidden_dim, 
+        #                                      num_layers=num_siamese_layers, 
+        #                                      dropout=dropout)
 
-        self.dense_head = torch.nn.Sequential(
-            torch.nn.Dropout(p=0.1),
-            torch.nn.Linear(embed_dim, 1),
+        # self.self_transformer_block = AnkhModule(num_siamese_layers=num_siamese_layers)
+        # self.freeze_self_transformer()
+
+        self.self_transformer_block = SelfTransformerModule(input_dim=self.embed_dim,
+                                                            num_heads=num_heads,
+                                                            hidden_dim=hidden_dim,
+                                                            num_layers=num_siamese_layers,
+                                                            dropout=dropout)
+
+        self.cross_transformer_block = CrossTransformerModule(input_dim=self.embed_dim, 
+                                                              num_heads=num_heads, 
+                                                              hidden_dim=hidden_dim, 
+                                                              num_layers=num_cross_layers, 
+                                                              dropout=dropout)
+
+        self.decoder = torch.nn.Sequential(
+            torch.nn.Dropout(p=dropout),
+            torch.nn.Linear(self.embed_dim, 1),
             torch.nn.Sigmoid()
         )
 
-    def forward(self, batch, need_weights=False):
-        (input_ids1, attention_mask1), (input_ids2, attention_mask2), _ = batch
+    def forward(self, batch):
+        (x1, mask1), (x2, mask2), _ = batch
 
-        pad1 = attention_mask1.squeeze().to(torch.float32)
-        pad2 = attention_mask2.squeeze().to(torch.float32)
+        x1 = self.embedding(x1)
+        x2 = self.embedding(x2)
 
-        x1 = self.embedding(input_ids1.squeeze().transpose(0, 1))
-        x2 = self.embedding(input_ids2.squeeze().transpose(0, 1))
+        x1 = self.self_transformer_block(x1, mask1)
+        x2 = self.self_transformer_block(x2, mask2)
 
-        x1 = self.positional_encoding(x1)
-        x2 = self.positional_encoding(x2)
+        x = self.cross_transformer_block(x1, x2, (mask1, mask2))
 
-        for i in range(len(self.transformer_blocks)):
-            if i == len(self.transformer_blocks) - 1 and need_weights:
-                x1, w1 = self.transformer_blocks[i](x1, key_padding_mask=pad1, need_weights=True)
-                x2, w2 = self.transformer_blocks[i](x2, key_padding_mask=pad2, need_weights=True)
-            else:
-                x1 = self.transformer_blocks[i](x1, key_padding_mask=pad1)
-                x2 = self.transformer_blocks[i](x2, key_padding_mask=pad2)
+        x = self.decoder(x)
 
-        x = self.cross_transformer_block(x1, x2, key_padding_mask1=pad1, key_padding_mask2=pad2)
-        x = self.dense_head(x[0].squeeze())
-        if need_weights:
-            return x, w1, w2
         return x
+    
+    def freeze_self_transformer(self):
+        for param in self.self_transformer_block.parameters():
+            param.requires_grad = False
+
+    def unfreeze_self_transformer(self):
+        for param in self.self_transformer_block.parameters():
+            param.requires_grad = True
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=0.01)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=0.01) #TODO: change the wd bask to 0.01
 
         lr_dict = {
             "scheduler": CosineWarmupScheduler(optimizer=optimizer, warmup=5, max_iters=200),
@@ -333,55 +419,79 @@ class AttentionModel(BaselineModel):
 
 
 if __name__ == '__main__':
-    from dataset import PairSequenceData, SequencesDataset
-    from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
     logging.basicConfig(level=logging.INFO)
 
-    sequences = SequencesDataset(sequences_path="string12.0_experimental_score_500.fasta")
+    # os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    # os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
-    dataset = PairSequenceData(pairs_path="string12.0_experimental_score_500_train.tsv",
-                                sequences_dataset=sequences)
+    # tokenizer = PPITokenizer()
+    _, tokenizer = ankh.load_base_model()
 
-    dataset_test = PairSequenceData(pairs_path="string12.0_experimental_score_500_test.tsv",
-                                    sequences_dataset=sequences)
+    sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500.fasta")
+
+    dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_train.tsv",
+                                sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=10000)
+
+    dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_test.tsv",
+                                    sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=2500)
+
+    # sequences = SequencesDataset(sequences_path="/home/volzhenin/SENSE-PPI/data/string11.0/human.fasta")
+
+    # dataset = PairSequenceData(pairs_path="/home/volzhenin/SENSE-PPI/data/string11.0/human_train.tsv",
+    #                             sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=10000)
+
+    # dataset_test = PairSequenceData(pairs_path="/home/volzhenin/SENSE-PPI/data/string11.0/human_test.tsv",
+    #                                 sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=2500)
 
     parser = argparse.ArgumentParser()
-    parser = AttentionModel.add_model_specific_args(parser)
+    parser = PPITransformerModel.add_model_specific_args(parser)
     parser = pl.Trainer.add_argparse_args(parser)
     params = parser.parse_args()
 
-    params.max_len = dataset.max_len + 2
+    params.max_len = dataset.max_len
 
-    model = AttentionModel(params, ntoken=len(dataset.tokenizer), embed_dim=256)
+    #define sync_dist parameter for distributed training
+    if 'ddp' in str(params.strategy):
+        params.sync_dist = True
+        print('Distributed syncronisation is enabled')
 
-    # ckpt = torch.load("logs/AttentionModelBase/version_0/checkpoints/chkpt_loss_based_epoch=13-val_loss=0.085-val_BinaryF1Score=0.851.ckpt")
+    model = PPITransformerModel(params, 
+                           ntoken=len(dataset.tokenizer), 
+                           embed_dim=512, #512
+                            hidden_dim=2048, #2048
+                            num_siamese_layers=6, #6
+                            num_cross_layers=3, #3
+                            num_heads=8, #8
+                            dropout=0.1)
+
+    # ckpt = torch.load("/home/volzhenin/T5-ppi/logs/AttentionModelBase/version_19/checkpoints/chkpt_loss_based_epoch=16-val_loss=0.056-val_BinaryF1Score=0.900.ckpt")
     # model.load_state_dict(ckpt['state_dict'])
 
     # model.load_data(dataset=dataset, valid_size=0.01)
     train_set = model.train_dataloader(dataset, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=True)
-    val_set = model.val_dataloader(dataset_test, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=True)
+    val_set = model.val_dataloader(dataset_test, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=False)
 
     logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
 
     callbacks = [
-        TQDMProgressBar(refresh_rate=500),
+        # TQDMProgressBar(refresh_rate=250),
         ModelCheckpoint(filename='chkpt_loss_based_{epoch}-{val_loss:.3f}-{val_BinaryF1Score:.3f}', verbose=True,
                         monitor='val_loss', mode='min', save_top_k=1),
-        EarlyStopping(monitor="val_loss", patience=10,
+        EarlyStopping(monitor="val_loss", patience=5,
                       verbose=False, mode="min")
     ]
 
     torch.set_float32_matmul_precision('medium')
 
-    trainer = pl.Trainer(accelerator=params.accelerator, 
+    trainer = pl.Trainer(accelerator='gpu' if torch.cuda.is_available() else 'auto', 
                          num_nodes=params.num_nodes,
                          strategy=params.strategy,
+                         devices=params.devices,
+                         accumulate_grad_batches=params.accumulate_grad_batches,
                          max_epochs=100,
                          logger=logger, 
                          callbacks=callbacks)
+                        #  val_check_interval=0.25)
 
     trainer.fit(model, train_set, val_set)
-
-    # pred_loader = DataLoader(dataset=dataset_test, batch_size=32, num_workers=8, shuffle=False)
-    # pred, w1, w2 = model(batch=next(iter(pred_loader)), need_weights=True)
-    # print(w1.shape)
