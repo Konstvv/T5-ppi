@@ -1,8 +1,11 @@
 import pandas as pd
 import os
+
 import dask.dataframe as dd
 from dask.distributed import Client
 import dask
+from pandarallel import pandarallel
+
 from Bio import SeqIO
 from tqdm import tqdm
 from Bio import SeqIO
@@ -18,7 +21,7 @@ import wget
 import gzip
 import shutil
 import random
-from pandarallel import pandarallel
+import pickle
 
 DOWNLOAD_LINK_STRING = "https://stringdb-downloads.org/download/"
 
@@ -39,7 +42,6 @@ class STRINGDatasetCreation:
         self.sequences_file = params.sequences
         self.min_length = params.min_length
         self.max_length = params.max_length
-        self.fasta_records = []
         self.species = 'custom' if params.species is None else params.species
         self.max_positive_pairs = params.max_positive_pairs
         self.combined_score = params.combined_score
@@ -53,11 +55,36 @@ class STRINGDatasetCreation:
                         threads_per_worker=self.params.threads_per_worker,
                         memory_limit=self.params.memory_limit)
 
-        self.preprocess_fasta_file()
+        # pandarallel.initialize(progress_bar=True)
 
-        self.clusters = self._create_clusters()
+        # self.preprocess_fasta_file()
+        if not os.path.exists('pickles/fasta_dict.pkl'):
+            self.fasta_records = self.preprocess_fasta_file()
+            with open('pickles/fasta_dict.pkl', 'wb') as f:
+                pickle.dump(self.fasta_records, f)
+        else:
+            with open('pickles/fasta_dict.pkl', 'rb') as f:
+                self.fasta_records = pickle.load(f)
+            logging.info('Total number of proteins in the fasta file: {}'.format(len(self.fasta_records)))
 
-        positive_interactions, proteins_dict = self.select_interactions_and_prots()
+        if not os.path.exists('pickles/clusters.pkl'):
+            self.clusters = self._create_clusters()
+            with open('pickles/clusters.pkl', 'wb') as f:
+                pickle.dump(self.clusters, f)
+        else:
+            with open('pickles/clusters.pkl', 'rb') as f:
+                self.clusters = pickle.load(f)
+            logging.info('Proteins in clusters: {}'.format(len(self.clusters)))
+            logging.info('Number of clusters: {}'.format(len(set(self.clusters.values()))))
+
+        if not os.path.exists('pickles/int_prots.pkl'):
+            positive_interactions, proteins_dict = self.select_interactions_and_prots()
+            with open('pickles/int_prots.pkl', 'wb') as f:
+                pickle.dump((positive_interactions, proteins_dict), f)
+        else:
+            with open('pickles/int_prots.pkl', 'rb') as f:
+                positive_interactions, proteins_dict = pickle.load(f)
+            logging.info('Interactions loaded from pkl.')
 
         interactions = self.create_negatives(positive_interactions, proteins_dict)
 
@@ -98,15 +125,17 @@ class STRINGDatasetCreation:
             infomsg += ', experimental score >= {}'.format(self.experimental_score)
         logging.info(infomsg)
 
-        interactions = dd.read_csv(self.interactions_file, sep=' ')
-        interactions = interactions[interactions['homology'] == 0]
+        interactions = dd.read_csv(self.interactions_file, 
+                                   sep=' ', 
+                                   usecols=['protein1', 'protein2', 'combined_score', 'homology', 'experiments'])
         if self.experimental_score is not None:
             interactions = interactions[interactions['experiments'] > self.experimental_score]
         interactions = interactions[interactions['combined_score'] > self.combined_score]
+        interactions = interactions[interactions['homology'] == 0]
+        interactions = interactions[['protein1', 'protein2', 'combined_score']]
         if self.species != 'custom':
             interactions = interactions[interactions['protein1'].str.startswith(self.species) & interactions['protein2'].str.startswith(self.species)]
         interactions = interactions[interactions['protein1'].isin(self.fasta_records.keys()) & interactions['protein2'].isin(self.fasta_records.keys())]
-        interactions = interactions[['protein1', 'protein2', 'combined_score']]
         interactions['combined_score'] = 1      
         interactions['clusters'] = interactions.apply(lambda row: (self.clusters[row['protein1']], self.clusters[row['protein2']]) 
                                                       if row['protein1'] < row['protein2'] 
@@ -150,8 +179,9 @@ class STRINGDatasetCreation:
 
         logging.info('Generating negative pairs.')
 
-        # convert the node degrees in protein dict into probabilities for negative sampling
+        # Convert the node degrees in protein dict into probabilities for negative sampling
         proteins_dict = {k: v / sum(proteins_dict.values()) for k, v in proteins_dict.items()}
+
         proteins1 = random.choices(list(proteins_dict.keys()), weights=proteins_dict.values(), k=positive_len * 15)
         proteins2 = random.choices(list(proteins_dict.keys()), weights=proteins_dict.values(), k=positive_len * 15)
         negative_pairs = pd.DataFrame({'protein1': proteins1, 'protein2': proteins2, 'combined_score': 0})
@@ -201,8 +231,8 @@ class STRINGDatasetCreation:
         test_set = interactions.iloc[:test_size]
         train_set = interactions.iloc[test_size:]
 
-        test_set.to_csv(''.join(self.SAVE_PAIRS_PATH.split('.')[:-1]) + '_test.tsv', sep='\t', index=False, header=False)
-        train_set.to_csv(''.join(self.SAVE_PAIRS_PATH.split('.')[:-1]) + '_train.tsv', sep='\t', index=False, header=False)
+        test_set.to_csv('.'.join(self.SAVE_PAIRS_PATH.split('.')[:-1]) + '_test.tsv', sep='\t', index=False, header=False)
+        train_set.to_csv('.'.join(self.SAVE_PAIRS_PATH.split('.')[:-1]) + '_train.tsv', sep='\t', index=False, header=False)
 
         logging.info('Train and test sets saved to files.')
 
@@ -211,18 +241,20 @@ class STRINGDatasetCreation:
     # A method to remove sequences of inappropriate length from a fasta file
     def preprocess_fasta_file(self):
         logging.info('Getting protein records out of fasta file.')
-        self.fasta_records ={record.id: record.seq for record in tqdm(SeqIO.parse(self.sequences_file, 'fasta'))}
-        logging.info('Total number of proteins in the fasta file: {}'.format(len(self.fasta_records)))
+        fasta_records ={record.id: record.seq for record in tqdm(SeqIO.parse(self.sequences_file, 'fasta'))}
+        logging.info('Total number of proteins in the fasta file: {}'.format(len(fasta_records)))
 
         if not params.not_remove_long_short_proteins:
             logging.info(
                 'Removing proteins that are shorter than {}aa or longer than {}aa.'.format(self.min_length,
                                                                                         self.max_length))
 
-            self.fasta_records = {k: v for k, v in self.fasta_records.items() if
+            fasta_records = {k: v for k, v in fasta_records.items() if
                                     self.min_length <= len(v) <= self.max_length}
             
-            logging.info('Total number of proteins after filtering: {}'.format(len(self.fasta_records)))
+            logging.info('Total number of proteins after filtering: {}'.format(len(fasta_records)))
+
+        return fasta_records
 
 def add_args(parser):
     group = parser.add_mutually_exclusive_group(required=True)
@@ -252,9 +284,9 @@ def add_args(parser):
                         help="The experimental score threshold for the pairs extracted from STRING. "
                              "Ranges from 0 to 1000. Default is None, which means that the experimental "
                              "score is not used.")
-    parser.add_argument("--n_workers", type=int, default=1,
+    parser.add_argument("--n_workers", type=int, default=multiprocessing.cpu_count(),
                         help="The number of workers to use for parallel processing.")
-    parser.add_argument("--threads_per_worker", type=int, default=multiprocessing.cpu_count(),
+    parser.add_argument("--threads_per_worker", type=int, default=1,
                         help="The number of threads per worker.")
     parser.add_argument("--memory_limit", type=str, default='4GB',
                         help="The memory limit for each worker.")

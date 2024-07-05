@@ -15,6 +15,7 @@ import logging
 import transformers.models.convbert as c_bert
 from dataset import PairSequenceData, SequencesDataset, PairSequenceDataIterable
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
+import wandb
 from tokenizer import PPITokenizer
 import ankh
 
@@ -431,18 +432,11 @@ if __name__ == '__main__':
     sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500.fasta")
 
     dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_train.tsv",
-                                sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=10000)
+                                sequences_dataset=sequences, tokenizer=tokenizer)
 
     dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_test.tsv",
-                                    sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=2500)
+                                    sequences_dataset=sequences, tokenizer=tokenizer)
 
-    # sequences = SequencesDataset(sequences_path="/home/volzhenin/SENSE-PPI/data/string11.0/human.fasta")
-
-    # dataset = PairSequenceData(pairs_path="/home/volzhenin/SENSE-PPI/data/string11.0/human_train.tsv",
-    #                             sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=10000)
-
-    # dataset_test = PairSequenceData(pairs_path="/home/volzhenin/SENSE-PPI/data/string11.0/human_test.tsv",
-    #                                 sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=2500)
 
     parser = argparse.ArgumentParser()
     parser = PPITransformerModel.add_model_specific_args(parser)
@@ -458,24 +452,25 @@ if __name__ == '__main__':
 
     model = PPITransformerModel(params, 
                            ntoken=len(dataset.tokenizer), 
-                           embed_dim=512, #512
-                            hidden_dim=2048, #2048
-                            num_siamese_layers=6, #6
-                            num_cross_layers=3, #3
-                            num_heads=8, #8
+                           embed_dim=32, # 128 #512
+                            hidden_dim=128, #2048
+                            num_siamese_layers=1, #6
+                            num_cross_layers=1, #3
+                            num_heads=2, #8
                             dropout=0.1)
 
-    # ckpt = torch.load("/home/volzhenin/T5-ppi/logs/AttentionModelBase/version_19/checkpoints/chkpt_loss_based_epoch=16-val_loss=0.056-val_BinaryF1Score=0.900.ckpt")
+    # ckpt = torch.load("/home/volzhenin/T5-ppi/logs/AttentionModelBase/version_172/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.141-val_BinaryF1Score=0.688.ckpt")
     # model.load_state_dict(ckpt['state_dict'])
 
     # model.load_data(dataset=dataset, valid_size=0.01)
     train_set = model.train_dataloader(dataset, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=True)
     val_set = model.val_dataloader(dataset_test, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=False)
 
-    logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
+    # logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
+    logger = pl.loggers.WandbLogger(project='ppi-transformer', name='AttentionModelBase')
 
     callbacks = [
-        # TQDMProgressBar(refresh_rate=250),
+        TQDMProgressBar(refresh_rate=250),
         ModelCheckpoint(filename='chkpt_loss_based_{epoch}-{val_loss:.3f}-{val_BinaryF1Score:.3f}', verbose=True,
                         monitor='val_loss', mode='min', save_top_k=1),
         EarlyStopping(monitor="val_loss", patience=5,
@@ -491,7 +486,9 @@ if __name__ == '__main__':
                          accumulate_grad_batches=params.accumulate_grad_batches,
                          max_epochs=100,
                          logger=logger, 
-                         callbacks=callbacks)
-                        #  val_check_interval=0.25)
+                         callbacks=callbacks,
+                         val_check_interval=0.5)
 
     trainer.fit(model, train_set, val_set)
+
+    wandb.finish()

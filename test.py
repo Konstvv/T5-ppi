@@ -55,4 +55,4 @@ if __name__ == '__main__':
     dataset = PairSequenceData(pairs_path="aphid_small.tsv",
                                 sequences_dataset=sequences, tokenizer=tokenizer, max_len=800)
     
-    test_model(checkpoint_folder='logs/AttentionModelBase/version_171', dataset=dataset)
+    test_model(checkpoint_folder='logs/AttentionModelBase/version_173', dataset=dataset)
