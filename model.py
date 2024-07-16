@@ -320,21 +320,21 @@ class CrossTransformerModule(pl.LightningModule):
 #             x = layer(x)[0]
 #         return x
     
-class AnkhModule(pl.LightningModule):
-    def __init__(self, num_siamese_layers: int):
-        super().__init__()
-        ankh_model, _ = ankh.load_base_model()
+# class AnkhModule(pl.LightningModule):
+#     def __init__(self, num_siamese_layers: int):
+#         super().__init__()
+#         ankh_model, _ = ankh.load_base_model()
 
-        self.ankh_module = torch.nn.ModuleList()
-        self.embed_tokens = ankh_model.base_model.encoder.embed_tokens
-        for i in range(num_siamese_layers):
-            self.ankh_module.append(ankh_model.base_model.encoder.block[i])
+#         self.ankh_module = torch.nn.ModuleList()
+#         self.embed_tokens = ankh_model.base_model.encoder.embed_tokens
+#         for i in range(num_siamese_layers):
+#             self.ankh_module.append(ankh_model.base_model.encoder.block[i])
 
-    def forward(self, x):
-        x = self.embed_tokens(x)
-        for layer in self.ankh_module:
-            x = layer(x)[0]
-        return x
+#     def forward(self, x):
+#         x = self.embed_tokens(x)
+#         for layer in self.ankh_module:
+#             x = layer(x)[0]
+#         return x
     
 
 class PPITransformerModel(BaselineModel):
@@ -373,7 +373,8 @@ class PPITransformerModel(BaselineModel):
                                                               num_heads=num_heads, 
                                                               hidden_dim=hidden_dim, 
                                                               num_layers=num_cross_layers, 
-                                                              dropout=dropout)
+                                                              dropout=dropout,
+                                                              pooling='max')
 
         self.decoder = torch.nn.Sequential(
             torch.nn.Dropout(p=dropout),
@@ -426,8 +427,8 @@ if __name__ == '__main__':
     # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     # os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
-    # tokenizer = PPITokenizer()
-    _, tokenizer = ankh.load_base_model()
+    tokenizer = PPITokenizer()
+    # _, tokenizer = ankh.load_base_model()
 
     sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500.fasta")
 
@@ -452,11 +453,11 @@ if __name__ == '__main__':
 
     model = PPITransformerModel(params, 
                            ntoken=len(dataset.tokenizer), 
-                           embed_dim=32, # 128 #512
-                            hidden_dim=128, #2048
-                            num_siamese_layers=1, #6
-                            num_cross_layers=1, #3
-                            num_heads=2, #8
+                           embed_dim=64, #64/ # 128 #512
+                            hidden_dim=512, #512/ #2048
+                            num_siamese_layers=6, #6
+                            num_cross_layers=3, #3
+                            num_heads=8, #8
                             dropout=0.1)
 
     # ckpt = torch.load("/home/volzhenin/T5-ppi/logs/AttentionModelBase/version_172/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.141-val_BinaryF1Score=0.688.ckpt")
