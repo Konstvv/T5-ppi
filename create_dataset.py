@@ -58,6 +58,7 @@ class STRINGDatasetCreation:
         # pandarallel.initialize(progress_bar=True)
 
         # self.preprocess_fasta_file()
+        os.makedirs('pickles', exist_ok=True)
         if not os.path.exists('pickles/fasta_dict.pkl'):
             self.fasta_records = self.preprocess_fasta_file()
             with open('pickles/fasta_dict.pkl', 'wb') as f:
