@@ -15,12 +15,13 @@ class SequencesDataset:
 
         logging.info(f"Reading sequences from {self.sequences_path}")
         self.sequences = SeqIO.to_dict(SeqIO.parse(self.sequences_path, "fasta"))
+        self.sequences = {k: str(v.seq) for k, v in self.sequences.items()}
 
-        self.max_len = max([len(str(self.sequences[x].seq)) for x in self.sequences])
+        self.max_len = max([len(self.sequences[x]) for x in self.sequences])
         logging.info(f"Max sequence length of the fasta file: {self.max_len}")
 
     def __getitem__(self, idx):
-        return self.sequences[idx].seq
+        return self.sequences[idx]
     
     def __len__(self):
         return len(self.sequences)
@@ -78,11 +79,13 @@ class PairSequenceDataIterable(IterableDataset, PairSequenceDataBase):
         chunk_iterator = pd.read_csv(self.pairs_path, delimiter='\t', names=["seq1", "seq2", "label"],
                                      dtype=self.dtypes, chunksize=self.chunk_size)
 
+        chunk_iterator['label'] = chunk_iterator['label'].astype(np.int8)
+
         for chunk in chunk_iterator:
             for _, row in chunk.iterrows():
-                id1 = str(self.sequences_dataset[row["seq1"]])
-                id2 = str(self.sequences_dataset[row["seq2"]])
-                label = int(row["label"])
+                id1 = self.sequences_dataset[row["seq1"]]
+                id2 = self.sequences_dataset[row["seq2"]]
+                label = row["label"]
                 yield id1, id2, label
 
 
@@ -102,18 +105,22 @@ class PairSequenceData(PairSequenceDataBase):
             self.data = self.data[~self.data["seq2"].isin(unwanted_sequences)]
             logging.info(f"Number of pairs after removing the long sequences: {len(self.data)}")
 
+        self.data['label'] = self.data['label'].astype(np.int8)
+        self.data = self.data.to_dict(orient="records")
+
     def __len__(self):
         return len(self.data)
     
     def __getitem__(self, idx):
-        row = self.data.iloc[idx]
-        id1 = str(self.sequences_dataset[row["seq1"]])
-        id2 = str(self.sequences_dataset[row["seq2"]])
-        label = int(row["label"])
+        row = self.data[idx]
+        id1 = self.sequences_dataset[row["seq1"]]
+        id2 = self.sequences_dataset[row["seq2"]]
+        label = row["label"]
         return id1, id2, label
 
 
 if __name__ == '__main__':
+    import time
     logging.basicConfig(level=logging.INFO)
 
     sequences = SequencesDataset(sequences_path="/home/volzhenin/SENSE-PPI/data/guo_yeast/sequences.fasta")
@@ -121,9 +128,14 @@ if __name__ == '__main__':
     data = PairSequenceData(pairs_path="/home/volzhenin/SENSE-PPI/data/guo_yeast/protein.pairs.tsv",
                             sequences_dataset=sequences, max_len=1000)
 
-    loader = DataLoader(dataset=data, batch_size=2, num_workers=1, collate_fn=data.collate_fn, shuffle=True)
+    loader = DataLoader(dataset=data, batch_size=512, num_workers=8, collate_fn=data.collate_fn, shuffle=True)
+
+    epoch_times = []
 
     for batch in loader:
+        start_time = time.time()
         (input_ids1, attention_mask1), (input_ids2, attention_mask2), labels = batch
-        print(input_ids1.shape, attention_mask1.shape, input_ids2.shape, attention_mask2.shape, labels)
-        break
+        end_time = time.time()
+        epoch_times.append(end_time - start_time)
+
+    print(f"Average time per batch: {np.mean(epoch_times)}")
