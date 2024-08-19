@@ -14,12 +14,17 @@
 # limitations under the License.
 import os
 from typing import List, Optional
+from Bio import SeqIO
 
-from transformers import PreTrainedTokenizer
+from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.decoders import BPEDecoder
 
 VOCAB_LIST = ['L', 'A', 'G', 'V', 'S', 'E', 'R', 'T', 'I',
               'D', 'P', 'K', 'Q', 'N', 'F', 'Y', 'M', 'H',
-              'W', 'C', 'X', 'B', 'U', 'Z', 'O', '.', '-']
+              'W', 'C', 'X', 'B', 'U', 'Z', 'O']
 
 
 class PPITokenizer(PreTrainedTokenizer):
@@ -125,13 +130,37 @@ class PPITokenizer(PreTrainedTokenizer):
         return len(self.all_tokens)
 
 
+def train_tokenizer(vocab_size: int, fasta_file: str, save_dir: str):
+    with open(fasta_file) as f:
+        records = SeqIO.parse(f, "fasta")
+        seqs = [str(record.seq) for record in records]
+
+    special_tokens = ['[PAD]', '[UNK]']
+
+    tokenizer = Tokenizer(BPE())
+    tokenizer.decoder = BPEDecoder()
+    tokenizer.add_special_tokens(special_tokens)
+
+    trainer = BpeTrainer(vocab_size=vocab_size, special_tokens=special_tokens)
+    tokenizer.train_from_iterator(seqs, trainer=trainer)
+
+    pre_trained_tokenizer = PreTrainedTokenizerFast(tokenizer_object=tokenizer, unk_token=special_tokens[1], pad_token=special_tokens[0])
+    pre_trained_tokenizer.save_pretrained(save_dir)
+
+
 if __name__ == '__main__':
-    tokenizer = PPITokenizer()
-    # prot = "MAX:W+++WWW"
-    prot = "MKVWW"
-    print(tokenizer.all_special_ids)
-    print(tokenizer.batch_encode_plus([prot, prot], return_tensors="pt", padding='max_length', max_length=8))
+    vocab_size=1000
+    fasta_file = '/home/volzhenin/T5-ppi/string12.0_combined_score_900.fasta'
+    save_dir = '/home/volzhenin/T5-ppi/tokenizer'
+
+    train_tokenizer(vocab_size, fasta_file, save_dir)
+
+
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(save_dir)
+
+    prot = "MKVWAVAKLKLW"
+    print(prot)
+    print(tokenizer.batch_encode_plus([prot, prot+prot], return_tensors="pt", padding='longest', max_length=8, truncation=True))
     print(len(tokenizer))
     print(tokenizer.special_tokens_map)
-    # print(tokenizer.decode(tokenizer.encode(prot)))
-    exit()
+    print(tokenizer.decode(tokenizer.encode(prot)))

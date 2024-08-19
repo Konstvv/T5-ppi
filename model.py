@@ -18,6 +18,7 @@ from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyS
 import wandb
 from tokenizer import PPITokenizer
 import ankh
+from transformers import PreTrainedTokenizerFast
 
 # from torch.nn import MultiheadAttention
 from rope import RotaryPEMultiHeadAttention as MultiheadAttention
@@ -427,8 +428,9 @@ if __name__ == '__main__':
     # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     # os.environ["TORCH_USE_CUDA_DSA"] = "1"
 
-    tokenizer = PPITokenizer()
+    # tokenizer = PPITokenizer()
     # _, tokenizer = ankh.load_base_model()
+    tokenizer = PreTrainedTokenizerFast.from_pretrained("tokenizer")
 
     sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500.fasta")
 
@@ -453,10 +455,10 @@ if __name__ == '__main__':
 
     model = PPITransformerModel(params, 
                            ntoken=len(dataset.tokenizer), 
-                           embed_dim=64, #64/ # 128 #512
-                            hidden_dim=512, #512/ #2048
-                            num_siamese_layers=6, #6
-                            num_cross_layers=3, #3
+                           embed_dim=512, #64/ #512
+                            hidden_dim=2048, #512/ #2048
+                            num_siamese_layers=12, #6
+                            num_cross_layers=6, #3
                             num_heads=8, #8
                             dropout=0.1)
 
