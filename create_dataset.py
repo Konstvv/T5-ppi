@@ -1,11 +1,8 @@
 import pandas as pd
+import multiprocessing
+# import modin.pandas as pd
+
 import os
-
-import dask.dataframe as dd
-from dask.distributed import Client
-import dask
-from pandarallel import pandarallel
-
 from Bio import SeqIO
 from tqdm import tqdm
 from Bio import SeqIO
@@ -50,13 +47,6 @@ class STRINGDatasetCreation:
         self.SAVE_SEQ_PATH = "sequences_{}.fasta".format(self.species)
         self.SAVE_PAIRS_PATH = "protein.pairs_{}.tsv".format(self.species)
 
-        logging.info('Using dask: %s', dask.__version__)
-        client = Client(n_workers=self.params.n_workers, 
-                        threads_per_worker=self.params.threads_per_worker,
-                        memory_limit=self.params.memory_limit)
-
-        # pandarallel.initialize(progress_bar=True)
-
         # self.preprocess_fasta_file()
         os.makedirs('pickles', exist_ok=True)
         if not os.path.exists('pickles/fasta_dict.pkl'):
@@ -78,20 +68,20 @@ class STRINGDatasetCreation:
             logging.info('Proteins in clusters: {}'.format(len(self.clusters)))
             logging.info('Number of clusters: {}'.format(len(set(self.clusters.values()))))
 
-        if not os.path.exists('pickles/int_prots.pkl'):
-            positive_interactions, proteins_dict = self.select_interactions_and_prots()
-            with open('pickles/int_prots.pkl', 'wb') as f:
-                pickle.dump((positive_interactions, proteins_dict), f)
-        else:
-            with open('pickles/int_prots.pkl', 'rb') as f:
-                positive_interactions, proteins_dict = pickle.load(f)
-            logging.info('Interactions loaded from pkl.')
+        positive_interactions, proteins_dict = self.select_interactions_and_prots()
+        # if not os.path.exists('pickles/int_prots.pkl'):
+        #     positive_interactions, proteins_dict = self.select_interactions_and_prots()
+        #     with open('pickles/int_prots.pkl', 'wb') as f:
+        #         pickle.dump((positive_interactions, proteins_dict), f)
+        # else:
+        #     with open('pickles/int_prots.pkl', 'rb') as f:
+        #         positive_interactions, proteins_dict = pickle.load(f)
+        #     logging.info('Interactions loaded from pkl.')
 
         interactions = self.create_negatives(positive_interactions, proteins_dict)
 
         self.train_test_split(interactions, test_size=0.1)
 
-        client.close()
 
     def _create_clusters(self):
         logging.info('Running mmseqs to clusterize proteins')
@@ -126,31 +116,56 @@ class STRINGDatasetCreation:
             infomsg += ', experimental score >= {}'.format(self.experimental_score)
         logging.info(infomsg)
 
-        interactions = dd.read_csv(self.interactions_file, 
-                                   sep=' ', 
-                                   usecols=['protein1', 'protein2', 'combined_score', 'homology', 'experiments'])
-        if self.experimental_score is not None:
-            interactions = interactions[interactions['experiments'] > self.experimental_score]
-        interactions = interactions[interactions['combined_score'] > self.combined_score]
-        interactions = interactions[interactions['homology'] == 0]
-        interactions = interactions[['protein1', 'protein2', 'combined_score']]
-        if self.species != 'custom':
-            interactions = interactions[interactions['protein1'].str.startswith(self.species) & interactions['protein2'].str.startswith(self.species)]
-        interactions = interactions[interactions['protein1'].isin(self.fasta_records.keys()) & interactions['protein2'].isin(self.fasta_records.keys())]
-        interactions['combined_score'] = 1      
+        # interactions = pd.read_csv(self.interactions_file, 
+        #                            sep=' ', 
+        #                            usecols=['protein1', 'protein2', 'combined_score', 'homology', 'experiments'])
+        # if self.experimental_score is not None:
+        #     interactions = interactions[interactions['experiments'] > self.experimental_score]
+        # interactions = interactions[interactions['combined_score'] > self.combined_score]
+        # interactions = interactions[interactions['homology'] == 0]
+        # interactions = interactions[['protein1', 'protein2', 'combined_score']]
+        # if self.species != 'custom':
+        #     interactions = interactions[interactions['protein1'].str.startswith(self.species) & interactions['protein2'].str.startswith(self.species)]
+        # interactions = interactions[interactions['protein1'].isin(self.fasta_records.keys()) & interactions['protein2'].isin(self.fasta_records.keys())]
+        # interactions['combined_score'] = 1      
+
+
+        # logging.info('Sorting positive protein pairs.')
+
+        # interactions['protein1'], interactions['protein2'] = zip(*interactions.apply(
+        #     lambda x: (x['protein1'], x['protein2']) if x['protein1'] < x['protein2'] else (
+        #         x['protein2'], x['protein1']), axis=1))
+
+        lines = []
+        with open(self.interactions_file, 'r') as f:
+            for line in tqdm(f):
+                if line.startswith('protein1'):
+                    continue
+                line = line.strip().split()
+                # protein1 protein2 homology experiments experiments_transferred database database_transferred textmining textmining_transferred combined_score
+                if int(line[-1]) < self.combined_score:
+                    continue
+                if self.experimental_score is not None and int(line[3]) < self.experimental_score:
+                    continue
+                if int(line[2]) > 0:
+                    continue
+                # if self.species != 'custom' and not (line[0].startswith(self.species) and line[1].startswith(self.species)):
+                    # continue
+                if line[0] not in self.fasta_records or line[1] not in self.fasta_records:
+                    continue
+                p1 = line[0] if line[0] < line[1] else line[1]
+                p2 = line[1] if line[0] < line[1] else line[0]
+                lines.append((p1, p2, 1))
+
+        #dataframe from list of tuples
+        interactions = pd.DataFrame(lines, columns=['protein1', 'protein2', 'combined_score'])
+
+        interactions = interactions.drop_duplicates(subset=['protein1', 'protein2'], keep='first')
+
         interactions['clusters'] = interactions.apply(lambda row: (self.clusters[row['protein1']], self.clusters[row['protein2']]) 
                                                       if row['protein1'] < row['protein2'] 
                                                       else (self.clusters[row['protein2']], self.clusters[row['protein1']]), 
-                                                      axis=1, meta=('clusters', 'object'))
-        interactions = interactions.compute()
-
-        logging.info('Sorting positive protein pairs.')
-
-        interactions['protein1'], interactions['protein2'] = zip(*interactions.apply(
-            lambda x: (x['protein1'], x['protein2']) if x['protein1'] < x['protein2'] else (
-                x['protein2'], x['protein1']), axis=1))
-        
-        interactions = interactions.drop_duplicates(subset=['protein1', 'protein2'], keep='first')
+                                                      axis=1)
 
         if self.max_positive_pairs is not None:
             self.max_positive_pairs = min(self.max_positive_pairs, len(interactions))
@@ -168,49 +183,91 @@ class STRINGDatasetCreation:
 
         logging.info('Final preprocessing for only positive pairs done.')
         logging.info('Sequences are saved to {}'.format(self.SAVE_SEQ_PATH))
-        logging.info('Number of proteins: {}'.format(len(self.clusters)))
+        logging.info('Number of proteins: {}'.format(len(proteins_dict)))
         logging.info('Number of interactions: {}'.format(len(interactions)))
         
         return interactions, proteins_dict
+    
+    def negative_pairs_multiprocessing(self, proteins1, proteins2, unique_clusters, i):
+        negative_pairs = []
+        for j in range(i, i + 10000):
+            p1 = proteins1[j]
+            p2 = proteins2[j]
+            sorted_pair = (p1, p2) if p1 < p2 else (p2, p1)
+            cluster_pair = (self.clusters[sorted_pair[0]], self.clusters[sorted_pair[1]])
+            if sorted_pair in negative_pairs or cluster_pair in unique_clusters:
+                continue
+            negative_pairs.append(sorted_pair)
+
+        logging.info('Generated {} negative pairs.'.format(len(negative_pairs)))
+        return negative_pairs
 
 
     def create_negatives(self, interactions, proteins_dict):
         
         positive_len = len(interactions)
-
+        
         logging.info('Generating negative pairs.')
+        logging.info(positive_len)
 
         # Convert the node degrees in protein dict into probabilities for negative sampling
-        proteins_dict = {k: v / sum(proteins_dict.values()) for k, v in proteins_dict.items()}
+        sum_proteins = sum(proteins_dict.values())
+        proteins_dict = {k: v / sum_proteins for k, v in proteins_dict.items()}
 
         proteins1 = random.choices(list(proteins_dict.keys()), weights=proteins_dict.values(), k=positive_len * 15)
         proteins2 = random.choices(list(proteins_dict.keys()), weights=proteins_dict.values(), k=positive_len * 15)
-        negative_pairs = pd.DataFrame({'protein1': proteins1, 'protein2': proteins2, 'combined_score': 0})
+        
+        # negative_pairs = pd.DataFrame({'protein1': proteins1, 'protein2': proteins2, 'combined_score': 0})
 
-        logging.info('Negative pairs generated. Processing started.')
+        # logging.info('Negative pairs generated. Processing started.')
         
-        negative_pairs['protein1'], negative_pairs['protein2'] = zip(*negative_pairs.apply(
-            lambda x: (x['protein1'], x['protein2']) if x['protein1'] < x['protein2'] else (
-                x['protein2'], x['protein1']), axis=1))
-        
+        # negative_pairs['protein1'], negative_pairs['protein2'] = zip(*negative_pairs.apply(
+        #     lambda x: (x['protein1'], x['protein2']) if x['protein1'] < x['protein2'] else (
+        #         x['protein2'], x['protein1']), axis=1))
+
         unique_clusters = set(interactions['clusters'].values)
         interactions = interactions.drop(columns='clusters')
 
-        logging.info('Filtering out pairs that are in the same cluster with proteins interacting with a given one already.')
+        logging.info('Unique clusters: {}'.format(len(unique_clusters)))
 
-        negative_pairs = dd.from_pandas(negative_pairs, 
-                                        npartitions=self.params.n_workers)
-        negative_pairs = negative_pairs[~negative_pairs.apply(
-            lambda x: (self.clusters[x['protein1']], self.clusters[x['protein2']]) in unique_clusters, 
-            axis=1, meta=('clusters', 'object'))]
-        negative_pairs = negative_pairs.compute()
+        negative_pairs = []
+        # i = 0
+        # while len(negative_pairs) < positive_len * 10:
+        #     # get a pair randomly (p1, p2) from the proteins_dict, each protein has a probability of being selected
+        #     p1 = proteins1[i]
+        #     p2 = proteins2[i]
+        #     i += 1
+        #     # p1 = random.choices(list(proteins_dict.keys()), weights=proteins_dict.values(), k=1)[0]
+        #     # p2 = random.choices(list(proteins_dict.keys()), weights=proteins_dict.values(), k=1)[0]
+        #     sorted_pair = (p1, p2) if p1 < p2 else (p2, p1)
+        #     cluster_pair = (self.clusters[sorted_pair[0]], self.clusters[sorted_pair[1]])
+        #     if sorted_pair in negative_pairs or cluster_pair in unique_clusters:
+        #         continue
+        #     negative_pairs.append(sorted_pair)
+
+        #     if len(negative_pairs) % 10000 == 0:
+        #         logging.info('Generated {} negative pairs.'.format(len(negative_pairs)))
+
+        with multiprocessing.Pool(self.params.threads_per_worker) as pool:
+            negative_pairs = pool.starmap(self.negative_pairs_multiprocessing, [(proteins1, proteins2, unique_clusters, i) for i in range(0, positive_len * 15, 10000)])
+            negative_pairs = [item for sublist in negative_pairs for item in sublist]
+            negative_pairs = negative_pairs[:positive_len * 10]
+        
+        negative_pairs = pd.DataFrame(negative_pairs, columns=['protein1', 'protein2'])
+        negative_pairs['combined_score'] = 0
+
+        # logging.info('Filtering out pairs that are in the same cluster with proteins interacting with a given one already.')
+
+        # negative_pairs = negative_pairs[~negative_pairs.apply(
+        #     lambda x: (self.clusters[x['protein1']], self.clusters[x['protein2']]) in unique_clusters, 
+        #     axis=1)]
 
         logging.info('Removing duplicates from the dataset.')
         interactions = pd.concat([interactions, negative_pairs], ignore_index=True)
         interactions = interactions.drop_duplicates(subset=['protein1', 'protein2'], keep='first')
 
-        assert len(interactions) > positive_len * 11, 'Not enough negative pairs generated. P' \
-                                                            'lease try again and increase the number of pairs (>1000).'
+        if len(interactions) > positive_len * 11:
+            logging.warning('Not enough negative pairs generated to suffice 1:10 positive-to-negative ratio.')
         
         interactions = interactions.iloc[:positive_len * 11]
 
