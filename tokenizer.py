@@ -155,7 +155,6 @@ if __name__ == '__main__':
 
     train_tokenizer(vocab_size, fasta_file, save_dir)
 
-
     tokenizer = PreTrainedTokenizerFast.from_pretrained(save_dir)
 
     prot = "MKVWAVAKLKLW"

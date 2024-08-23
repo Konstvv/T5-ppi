@@ -432,12 +432,20 @@ if __name__ == '__main__':
     # _, tokenizer = ankh.load_base_model()
     tokenizer = PreTrainedTokenizerFast.from_pretrained("tokenizer")
 
-    sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500.fasta")
+    # sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500.fasta")
 
-    dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_train.tsv",
+    # dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_train.tsv",
+    #                             sequences_dataset=sequences, tokenizer=tokenizer)
+
+    # dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_test.tsv",
+    #                                 sequences_dataset=sequences, tokenizer=tokenizer)
+
+    sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_combined_score_900.fasta")
+
+    dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/all_900_train.tsv",
                                 sequences_dataset=sequences, tokenizer=tokenizer)
 
-    dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_test.tsv",
+    dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/all_900_test.tsv",
                                     sequences_dataset=sequences, tokenizer=tokenizer)
 
 
@@ -490,7 +498,7 @@ if __name__ == '__main__':
                          max_epochs=100,
                          logger=logger, 
                          callbacks=callbacks,
-                         val_check_interval=0.5)
+                         val_check_interval=100000)
 
     trainer.fit(model, train_set, val_set)
 

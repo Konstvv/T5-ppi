@@ -189,15 +189,27 @@ class STRINGDatasetCreation:
         return interactions, proteins_dict
     
     def negative_pairs_multiprocessing(self, proteins1, proteins2, unique_clusters, i):
-        negative_pairs = []
-        for j in range(i, i + 10000):
-            p1 = proteins1[j]
-            p2 = proteins2[j]
-            sorted_pair = (p1, p2) if p1 < p2 else (p2, p1)
-            cluster_pair = (self.clusters[sorted_pair[0]], self.clusters[sorted_pair[1]])
-            if sorted_pair in negative_pairs or cluster_pair in unique_clusters:
-                continue
-            negative_pairs.append(sorted_pair)
+        # negative_pairs = []
+        # for j in range(i, i + 10000):
+        #     p1 = proteins1[j]
+        #     p2 = proteins2[j]
+        #     sorted_pair = (p1, p2) if p1 < p2 else (p2, p1)
+        #     cluster_pair = (self.clusters[sorted_pair[0]], self.clusters[sorted_pair[1]])
+        #     if sorted_pair in negative_pairs or cluster_pair in unique_clusters:
+        #         continue
+        #     negative_pairs.append(sorted_pair)
+
+        prots1 = proteins1[i:i + 10000]
+        prots2 = proteins2[i:i + 10000]
+
+        negative_pairs = pd.DataFrame({'protein1': prots1, 'protein2': prots2})
+        negative_pairs['protein1'], negative_pairs['protein2'] = zip(*negative_pairs.apply(
+            lambda x: (x['protein1'], x['protein2']) if x['protein1'] < x['protein2'] else (
+                x['protein2'], x['protein1']), axis=1))
+        
+        negative_pairs['clusters'] = negative_pairs.apply(lambda row: (self.clusters[row['protein1']], self.clusters[row['protein2']]))
+        negative_pairs = negative_pairs[~negative_pairs['clusters'].isin(unique_clusters)]
+        negative_pairs = negative_pairs[['protein1', 'protein2']].values.tolist()
 
         logging.info('Generated {} negative pairs.'.format(len(negative_pairs)))
         return negative_pairs
@@ -249,7 +261,7 @@ class STRINGDatasetCreation:
         #         logging.info('Generated {} negative pairs.'.format(len(negative_pairs)))
 
         with multiprocessing.Pool(self.params.threads_per_worker) as pool:
-            negative_pairs = pool.starmap(self.negative_pairs_multiprocessing, [(proteins1, proteins2, unique_clusters, i) for i in range(0, positive_len * 15, 10000)])
+            negative_pairs = pool.starmap(self.negative_pairs_multiprocessing, [(proteins1, proteins2, unique_clusters, i) for i in range(0, positive_len * 15 - 15000, 10000)])
             negative_pairs = [item for sublist in negative_pairs for item in sublist]
             negative_pairs = negative_pairs[:positive_len * 10]
         
