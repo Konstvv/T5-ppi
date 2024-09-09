@@ -6,8 +6,6 @@ import torch
 from tokenizer import PPITokenizer
 import logging
 
-import ankh
-
 class SequencesDataset:
     def __init__(self, sequences_path : str): 
 

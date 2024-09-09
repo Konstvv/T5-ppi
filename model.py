@@ -1,23 +1,17 @@
 import argparse
 import torch
-import os
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
-import torch.utils.data as data
-from torch.utils.data import Subset
 from torchmetrics import AUROC, Accuracy, Precision, Recall, F1Score, MatthewsCorrCoef, AveragePrecision
 from torchmetrics.collections import MetricCollection
 import torch.optim as optim
 import numpy as np
-import math
 import logging
 import transformers.models.convbert as c_bert
 from dataset import PairSequenceData, SequencesDataset, PairSequenceDataIterable
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
 import wandb
-from tokenizer import PPITokenizer
-import ankh
 from transformers import PreTrainedTokenizerFast
 
 # from torch.nn import MultiheadAttention
