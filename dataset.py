@@ -75,13 +75,16 @@ class PairSequenceDataIterable(IterableDataset, PairSequenceDataBase):
         super().__init__(*args, **kwargs)
         self.chunk_size = chunk_size
 
+        logging.info(f"Reading pairs from {self.pairs_path}")
+        logging.info(f"Chunk size: {self.chunk_size}")
+
+
     def __iter__(self):
         chunk_iterator = pd.read_csv(self.pairs_path, delimiter='\t', names=["seq1", "seq2", "label"],
                                      dtype=self.dtypes, chunksize=self.chunk_size)
 
-        chunk_iterator['label'] = chunk_iterator['label'].astype(np.int8)
-
         for chunk in chunk_iterator:
+            chunk['label'] = chunk['label'].astype(np.int8)
             for _, row in chunk.iterrows():
                 id1 = self.sequences_dataset[row["seq1"]]
                 id2 = self.sequences_dataset[row["seq2"]]
@@ -125,10 +128,10 @@ if __name__ == '__main__':
 
     sequences = SequencesDataset(sequences_path="/home/volzhenin/SENSE-PPI/data/guo_yeast/sequences.fasta")
 
-    data = PairSequenceData(pairs_path="/home/volzhenin/SENSE-PPI/data/guo_yeast/protein.pairs.tsv",
-                            sequences_dataset=sequences, max_len=1000)
+    data = PairSequenceDataIterable(pairs_path="/home/volzhenin/SENSE-PPI/data/guo_yeast/protein.pairs.tsv",
+                            sequences_dataset=sequences, max_len=1000, chunk_size=1000)
 
-    loader = DataLoader(dataset=data, batch_size=512, num_workers=8, collate_fn=data.collate_fn, shuffle=True)
+    loader = DataLoader(dataset=data, batch_size=32, num_workers=8, collate_fn=data.collate_fn)
 
     epoch_times = []
 

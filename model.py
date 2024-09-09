@@ -23,6 +23,24 @@ from transformers import PreTrainedTokenizerFast
 # from torch.nn import MultiheadAttention
 from rope import RotaryPEMultiHeadAttention as MultiheadAttention
 
+from pytorch_lightning.callbacks import Callback
+import gc
+
+class MemoryCleanupCallback(Callback):
+    def __init__(self):
+        super().__init__()
+        self.batch_idx = 0
+
+    def on_train_batch_end(self, *args, **kwargs):
+        #if batch index is multiple of 10000, do memory cleanup
+        self.batch_idx += 1
+        if self.batch_idx % 50000 == 0:
+            torch.cuda.empty_cache()
+            gc.collect()
+            logging.info('Memory cleanup done')
+            logging.info(f"Allocated memory: {torch.cuda.memory_allocated() / 1024**2} MB")
+            logging.info(f"Reserved memory: {torch.cuda.memory_reserved() / 1024**2} MB")
+
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
 
     def __init__(self, 
@@ -73,25 +91,26 @@ class BaselineModel(pl.LightningModule):
         _, _, labels = batch
         preds = self.forward(batch).view(-1)
         
-        # Check range of preds
-        # print(labels, preds)
+        # Manually disable autocast for binary_cross_entropy
+        with torch.cuda.amp.autocast(enabled=False):
+            # Ensure preds and labels are in float32
+            loss = F.binary_cross_entropy(preds.to(torch.float32), labels.to(torch.float32))
         
-        loss = F.binary_cross_entropy(preds, labels.to(torch.float32))
         return labels, preds, loss
 
     def training_step(self, batch, batch_idx):
         trues, preds, loss = self._single_step(batch)
-        self.train_metrics.update(preds, trues)
+        self.train_metrics.update(preds.detach(), trues.detach())
         return loss
 
     def test_step(self, batch, batch_idx):
         trues, preds, test_loss = self._single_step(batch)
-        self.test_metrics.update(preds, trues)
+        self.test_metrics.update(preds.detach(), trues.detach())
         self.log("test_loss", test_loss, batch_size=self.hparams.batch_size, sync_dist=self.hparams.sync_dist)
 
     def validation_step(self, batch, batch_idx):
         trues, preds, val_loss = self._single_step(batch)
-        self.valid_metrics.update(preds, trues)
+        self.valid_metrics.update(preds.detach(), trues.detach())
         self.log("val_loss", val_loss, batch_size=self.hparams.batch_size, sync_dist=self.hparams.sync_dist)
 
     def on_train_epoch_end(self):
@@ -131,12 +150,16 @@ class BaselineModel(pl.LightningModule):
             return DataLoader(dataset=self.train_set,
                           batch_size=self.hparams.batch_size,
                           num_workers=num_workers,
-                          collate_fn=collate_fn)
+                          collate_fn=collate_fn,
+                          pin_memory=True,
+                          prefetch_factor=2)
         return DataLoader(dataset=self.train_set,
                           batch_size=self.hparams.batch_size,
                           num_workers=num_workers,
                           collate_fn=collate_fn,
-                          shuffle=shuffle)
+                          shuffle=shuffle,
+                          pin_memory=True,
+                          prefetch_factor=2)
 
     def test_dataloader(self, test_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if test_set is not None:
@@ -145,12 +168,16 @@ class BaselineModel(pl.LightningModule):
             return DataLoader(dataset=self.test_set,
                           batch_size=self.hparams.batch_size,
                           collate_fn=collate_fn,
-                          num_workers=num_workers)
+                          num_workers=num_workers,
+                          pin_memory=True,
+                          prefetch_factor=2)
         return DataLoader(dataset=self.test_set,
                           batch_size=self.hparams.batch_size,
                           collate_fn=collate_fn,
                           num_workers=num_workers,
-                          shuffle=shuffle)
+                          shuffle=shuffle,
+                          pin_memory=True,
+                          prefetch_factor=2)
 
     def val_dataloader(self, val_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if val_set is not None:
@@ -159,12 +186,16 @@ class BaselineModel(pl.LightningModule):
             return DataLoader(dataset=self.val_set,
                           batch_size=self.hparams.batch_size,
                           collate_fn=collate_fn,
-                          num_workers=num_workers)
+                          num_workers=num_workers,
+                          pin_memory=True,
+                          prefetch_factor=2)
         return DataLoader(dataset=self.val_set,
                           batch_size=self.hparams.batch_size,
                           collate_fn=collate_fn,
                           num_workers=num_workers,
-                          shuffle=shuffle)
+                          shuffle=shuffle,
+                          pin_memory=True,
+                          prefetch_factor=2)
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -198,11 +229,12 @@ class SelfTransformerLayer(pl.LightningModule):
                  input_dim: int, 
                  num_heads: int, 
                  hidden_dim: int, 
-                 dropout: float = 0.2):
+                 dropout: float = 0.2,
+                 precision: int = 32):
         super().__init__()
         self.norm2 = torch.nn.LayerNorm(input_dim)
         self.norm3 = torch.nn.LayerNorm(input_dim)
-        self.attn = MultiheadAttention(input_dim, num_heads, dropout)
+        self.attn = MultiheadAttention(input_dim, num_heads, dropout, precision=precision)
         self.ffn = PositionwiseFeedForward(input_dim, hidden_dim, dropout)
 
     def forward(self, x, mask=None):
@@ -216,11 +248,12 @@ class CrossTransformerLayer(pl.LightningModule):
                  input_dim: int, 
                  num_heads: int, 
                  hidden_dim: int, 
-                 dropout: float = 0.2):
+                 dropout: float = 0.2,
+                 precision: int = 32):
         super().__init__()
         self.norm2 = torch.nn.LayerNorm(input_dim)
         self.norm3 = torch.nn.LayerNorm(input_dim)
-        self.cross_attention = MultiheadAttention(input_dim, num_heads, dropout)
+        self.cross_attention = MultiheadAttention(input_dim, num_heads, dropout, precision=precision)
         self.ffn = PositionwiseFeedForward(input_dim, hidden_dim, dropout)
 
     def forward(self, x1, x2, masks=None):
@@ -237,13 +270,14 @@ class SelfTransformerModule(pl.LightningModule):
                  num_heads: int, 
                  hidden_dim: int, 
                  dropout: float = 0.2, 
-                 num_layers: int = 1):
+                 num_layers: int = 1,
+                 precision: int = 32):
         
         super().__init__()
         self.norm = torch.nn.LayerNorm(input_dim)
 
         self.self_transformer_layers = torch.nn.ModuleList(
-            [SelfTransformerLayer(input_dim, num_heads, hidden_dim, dropout) for _ in range(num_layers)]
+            [SelfTransformerLayer(input_dim, num_heads, hidden_dim, dropout, precision=precision) for _ in range(num_layers)]
         )
 
     def forward(self, x, mask=None):
@@ -262,14 +296,15 @@ class CrossTransformerModule(pl.LightningModule):
                  hidden_dim: int, 
                  dropout: float = 0.2, 
                  num_layers: int = 1,
-                 pooling: str = 'max'):
+                 pooling: str = 'max',
+                 precision: int = 32):
         
         super().__init__()
 
         self.norm = torch.nn.LayerNorm(input_dim)
 
         self.cross_transformer_layers = torch.nn.ModuleList(
-            [CrossTransformerLayer(input_dim, num_heads, hidden_dim, dropout) for _ in range(num_layers)]
+            [CrossTransformerLayer(input_dim, num_heads, hidden_dim, dropout, precision=precision) for _ in range(num_layers)]
         )
 
         if pooling == 'mean':
@@ -368,14 +403,16 @@ class PPITransformerModel(BaselineModel):
                                                             num_heads=num_heads,
                                                             hidden_dim=hidden_dim,
                                                             num_layers=num_siamese_layers,
-                                                            dropout=dropout)
+                                                            dropout=dropout,
+                                                            precision=self.hparams.precision)
 
         self.cross_transformer_block = CrossTransformerModule(input_dim=self.embed_dim, 
                                                               num_heads=num_heads, 
                                                               hidden_dim=hidden_dim, 
                                                               num_layers=num_cross_layers, 
                                                               dropout=dropout,
-                                                              pooling='max')
+                                                              pooling='max',
+                                                                precision=self.hparams.precision)
 
         self.decoder = torch.nn.Sequential(
             torch.nn.Dropout(p=dropout),
@@ -434,16 +471,16 @@ if __name__ == '__main__':
 
     # sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500.fasta")
 
-    # dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_train.tsv",
-    #                             sequences_dataset=sequences, tokenizer=tokenizer)
+    # dataset = PairSequenceDataIterable(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_train.tsv",
+    #                             sequences_dataset=sequences, tokenizer=tokenizer, chunk_size=100000)
 
     # dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_test.tsv",
     #                                 sequences_dataset=sequences, tokenizer=tokenizer)
 
     sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_combined_score_900.fasta")
 
-    dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/all_900_train.tsv",
-                                sequences_dataset=sequences, tokenizer=tokenizer)
+    dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/all_900_train_shuffled.tsv",
+                                sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=100000)
 
     dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/all_900_test.tsv",
                                     sequences_dataset=sequences, tokenizer=tokenizer)
@@ -470,11 +507,12 @@ if __name__ == '__main__':
                             num_heads=8, #8
                             dropout=0.1)
 
-    # ckpt = torch.load("/home/volzhenin/T5-ppi/logs/AttentionModelBase/version_172/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.141-val_BinaryF1Score=0.688.ckpt")
-    # model.load_state_dict(ckpt['state_dict'])
+    ckpt = torch.load("ppi-transformer/bnbxhind/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.127-val_BinaryF1Score=0.729.ckpt")
+    model.load_state_dict(ckpt['state_dict'])
 
     # model.load_data(dataset=dataset, valid_size=0.01)
-    train_set = model.train_dataloader(dataset, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=True)
+    shuffle_train = False if isinstance(dataset, PairSequenceDataIterable) else True
+    train_set = model.train_dataloader(dataset, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=shuffle_train)
     val_set = model.val_dataloader(dataset_test, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=False)
 
     # logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
@@ -485,7 +523,8 @@ if __name__ == '__main__':
         ModelCheckpoint(filename='chkpt_loss_based_{epoch}-{val_loss:.3f}-{val_BinaryF1Score:.3f}', verbose=True,
                         monitor='val_loss', mode='min', save_top_k=1),
         EarlyStopping(monitor="val_loss", patience=5,
-                      verbose=False, mode="min")
+                      verbose=False, mode="min"),
+        MemoryCleanupCallback()
     ]
 
     torch.set_float32_matmul_precision('medium')
@@ -498,7 +537,8 @@ if __name__ == '__main__':
                          max_epochs=100,
                          logger=logger, 
                          callbacks=callbacks,
-                         val_check_interval=100000)
+                         val_check_interval=100000,
+                         precision=params.precision)
 
     trainer.fit(model, train_set, val_set)
 

@@ -93,11 +93,19 @@ class RotaryPEMultiHeadAttention(pl.LightningModule):
                  heads: int, 
                  dropout_prob: float, 
                  rope_percentage: float = 0.5, 
-                 bias: bool = False):
+                 bias: bool = False,
+                 precision = 32):
         super().__init__()
 
         self.d_k = d_model // heads
         self.heads = heads
+
+        if precision == 16:
+            self.min_value = torch.finfo(torch.float16).min
+        elif precision == 32:
+            self.min_value = torch.finfo(torch.float32).min
+        else:
+            raise ValueError("Precision for ROPE should be either 16 or 32")
 
         self.query = PrepareForMultiHeadAttention(d_model, heads, self.d_k, bias=bias)
         self.key = PrepareForMultiHeadAttention(d_model, heads, self.d_k, bias=bias)
@@ -160,7 +168,7 @@ class RotaryPEMultiHeadAttention(pl.LightningModule):
         scores *= self.scale
 
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e38)
+            scores = scores.masked_fill(mask == 0, self.min_value)
 
         attn = self.softmax(scores)
 
