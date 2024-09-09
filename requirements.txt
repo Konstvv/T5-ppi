@@ -1,6 +1,7 @@
 numpy
 pandas
 wget
+wandb
 scipy
 networkx
 torch>=1.12
