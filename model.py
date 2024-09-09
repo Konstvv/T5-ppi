@@ -471,12 +471,12 @@ if __name__ == '__main__':
     # dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_test.tsv",
     #                                 sequences_dataset=sequences, tokenizer=tokenizer)
 
-    sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_combined_score_900.fasta")
+    sequences = SequencesDataset(sequences_path="string12.0_combined_score_900.fasta")
 
-    dataset = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/all_900_train_shuffled.tsv",
+    dataset = PairSequenceData(pairs_path="all_900_train_shuffled.tsv",
                                 sequences_dataset=sequences, tokenizer=tokenizer)#, chunk_size=100000)
 
-    dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/all_900_test.tsv",
+    dataset_test = PairSequenceData(pairs_path="all_900_test.tsv",
                                     sequences_dataset=sequences, tokenizer=tokenizer)
 
 

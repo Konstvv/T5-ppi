@@ -1,12 +1,9 @@
 import argparse
-
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import pytorch_lightning as pl
 from model import PPITransformerModel
-import ankh
 
 from dataset import PairSequenceData, SequencesDataset
 from transformers import PreTrainedTokenizerFast
