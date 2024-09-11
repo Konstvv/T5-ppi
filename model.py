@@ -318,53 +318,6 @@ class CrossTransformerModule(pl.LightningModule):
         x = torch.cat([x1, x2], dim=1)
 
         return self.pooling(x.permute(0, 2, 1)).squeeze()
-
-
-# class ConvBertModule(pl.LightningModule):
-#     def __init__(
-#         self,
-#         input_dim: int,
-#         num_heads: int,
-#         hidden_dim: int,
-#         num_hidden_layers: int = 1,
-#         num_layers: int = 1,
-#         kernel_size: int = 9,
-#         dropout: float = 0.2):
-
-#         super().__init__()
-#         convbert_layers_config = c_bert.ConvBertConfig(
-#             hidden_size=input_dim,
-#             num_attention_heads=num_heads,
-#             intermediate_size=hidden_dim,
-#             conv_kernel_size=kernel_size,
-#             num_hidden_layers=num_hidden_layers,
-#             hidden_dropout_prob=dropout,
-#         )
-
-#         self.convbert_module_list = torch.nn.ModuleList(
-#             [c_bert.ConvBertLayer(convbert_layers_config) for _ in range(num_layers)]
-#         )
-
-#     def forward(self, x):
-#         for layer in self.convbert_module_list:
-#             x = layer(x)[0]
-#         return x
-    
-# class AnkhModule(pl.LightningModule):
-#     def __init__(self, num_siamese_layers: int):
-#         super().__init__()
-#         ankh_model, _ = ankh.load_base_model()
-
-#         self.ankh_module = torch.nn.ModuleList()
-#         self.embed_tokens = ankh_model.base_model.encoder.embed_tokens
-#         for i in range(num_siamese_layers):
-#             self.ankh_module.append(ankh_model.base_model.encoder.block[i])
-
-#     def forward(self, x):
-#         x = self.embed_tokens(x)
-#         for layer in self.ankh_module:
-#             x = layer(x)[0]
-#         return x
     
 
 class PPITransformerModel(BaselineModel):
@@ -383,15 +336,6 @@ class PPITransformerModel(BaselineModel):
         self.embed_dim = embed_dim
 
         self.embedding = torch.nn.Embedding(ntoken, self.embed_dim)
-        
-        # self.self_transformer_block = ConvBertModule(input_dim=self.embed_dim, 
-        #                                      num_heads=num_heads, 
-        #                                      hidden_dim=hidden_dim, 
-        #                                      num_layers=num_siamese_layers, 
-        #                                      dropout=dropout)
-
-        # self.self_transformer_block = AnkhModule(num_siamese_layers=num_siamese_layers)
-        # self.freeze_self_transformer()
 
         self.self_transformer_block = SelfTransformerModule(input_dim=self.embed_dim,
                                                             num_heads=num_heads,
@@ -415,7 +359,10 @@ class PPITransformerModel(BaselineModel):
         )
 
     def forward(self, batch):
-        (x1, mask1), (x2, mask2), _ = batch
+        if len(batch) == 3:
+            (x1, mask1), (x2, mask2), _ = batch
+        else:
+            (x1, mask1), (x2, mask2) = batch 
 
         x1 = self.embedding(x1)
         x2 = self.embedding(x2)
@@ -501,7 +448,7 @@ if __name__ == '__main__':
                             num_heads=8, #8
                             dropout=0.1)
 
-    ckpt = torch.load("ppi-transformer/bnbxhind/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.127-val_BinaryF1Score=0.729.ckpt")
+    ckpt = torch.load("ppi-transformer/6qfgdx0p/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.116-val_BinaryF1Score=0.762.ckpt")
     model.load_state_dict(ckpt['state_dict'])
 
     # model.load_data(dataset=dataset, valid_size=0.01)

@@ -20,6 +20,15 @@ import shutil
 import random
 import pickle
 
+def large_shuffle():
+    chunk_file = '/home/volzhenin/T5-ppi/all_900_train.tsv'
+    with open(chunk_file, 'r') as file:
+        lines = file.readlines()
+    random.shuffle(lines)
+    with open(chunk_file+'.tsv', 'w') as file:
+        file.writelines(lines)
+
+
 DOWNLOAD_LINK_STRING = "https://stringdb-downloads.org/download/"
 
 def get_string_url():
