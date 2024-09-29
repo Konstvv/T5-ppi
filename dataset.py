@@ -30,8 +30,9 @@ class PairSequenceDataBase(Dataset):
                  pairs_path: str,
                  sequences_dataset: SequencesDataset,
                  max_len: int = None,
-                 tokenizer= PPITokenizer(),
-                 remove_long_sequences: bool = False):
+                 tokenizer=None,
+                 remove_long_sequences: bool = False,
+                 for_esm=False):
 
         super().__init__()
         self.pairs_path = pairs_path
@@ -39,6 +40,7 @@ class PairSequenceDataBase(Dataset):
         self.tokenizer = tokenizer
         self.sequences_dataset = sequences_dataset
         self.remove_long_sequences = remove_long_sequences
+        self.for_esm = for_esm
         
         if max_len is not None:
             self.max_len = max_len
@@ -59,13 +61,20 @@ class PairSequenceDataBase(Dataset):
     def collate_fn(self, batch):
         id1, id2, labels = zip(*batch)
 
-        input_ids1, attention_mask1 = self._tokenize(id1)
-        input_ids2, attention_mask2 = self._tokenize(id2)
-
         labels = torch.tensor(labels)
 
-        return (input_ids1, attention_mask1), (input_ids2, attention_mask2), labels
-        # return input_ids1, input_ids2, labels
+        if self.for_esm:
+            return {'ids1': id1, 'ids2': id2, 'labels': labels}
+
+        else:
+            input_ids1, attention_mask1 = self._tokenize(id1)
+            input_ids2, attention_mask2 = self._tokenize(id2)
+
+            return {'ids1': (input_ids1, attention_mask1),
+                    'ids2': (input_ids2, attention_mask2), 
+                    'labels': labels,
+                    'seqs1': id1,
+                    'seqs2': id2}
 
 class PairSequenceDataIterable(IterableDataset, PairSequenceDataBase):
     def __init__(self, chunk_size=1000000, *args, **kwargs):

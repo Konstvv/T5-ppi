@@ -8,7 +8,7 @@ from torchmetrics.collections import MetricCollection
 import torch.optim as optim
 import numpy as np
 import logging
-import transformers.models.convbert as c_bert
+from torch.optim import Optimizer
 from dataset import PairSequenceData, SequencesDataset, PairSequenceDataIterable
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
 import wandb
@@ -20,6 +20,8 @@ from rope import RotaryPEMultiHeadAttention as MultiheadAttention
 from pytorch_lightning.callbacks import Callback
 import gc
 
+from esm import FastaBatchedDataset, pretrained
+
 class MemoryCleanupCallback(Callback):
     def __init__(self):
         super().__init__()
@@ -28,33 +30,42 @@ class MemoryCleanupCallback(Callback):
     def on_train_batch_end(self, *args, **kwargs):
         #if batch index is multiple of 10000, do memory cleanup
         self.batch_idx += 1
-        if self.batch_idx % 50000 == 0:
+        if self.batch_idx % 10000 == 0:
             torch.cuda.empty_cache()
             gc.collect()
-            logging.info('Memory cleanup done')
-            logging.info(f"Allocated memory: {torch.cuda.memory_allocated() / 1024**2} MB")
-            logging.info(f"Reserved memory: {torch.cuda.memory_reserved() / 1024**2} MB")
+            # logging.info('Memory cleanup done')
+            # logging.info(f"Allocated memory: {torch.cuda.memory_allocated() / 1024**2} MB")
+            # logging.info(f"Reserved memory: {torch.cuda.memory_reserved() / 1024**2} MB")
 
 class CosineWarmupScheduler(optim.lr_scheduler._LRScheduler):
 
-    def __init__(self, 
-                 optimizer, 
-                 warmup: int, 
+    def __init__(self,
+                 optimizer: Optimizer,
+                 warmup: int,
                  max_iters: int):
         self.warmup = warmup
         self.max_num_iters = max_iters
+        self.num_batches = 0
         super().__init__(optimizer)
 
     def get_lr(self):
-        lr_factor = self.get_lr_factor(epoch=self.last_epoch)
+        lr_factor = self.get_lr_factor(batch=self.num_batches)
         # print('Current lr: ', [base_lr * lr_factor for base_lr in self.base_lrs])
         return [base_lr * lr_factor for base_lr in self.base_lrs]
 
-    def get_lr_factor(self, epoch):
-        lr_factor = 0.5 * (1 + np.cos(np.pi * epoch / self.max_num_iters))
-        if epoch <= self.warmup:
-            lr_factor *= (epoch + 1) * 1.0 / self.warmup
+    def get_lr_factor(self, batch: int):
+        lr_factor = 0.5 * (1 + np.cos(np.pi * batch / self.max_num_iters))
+        if batch <= self.warmup:
+            lr_factor *= (batch + 1) * 1.0 / self.warmup
         return lr_factor
+
+    def step(self, batch=None):
+        if batch is None:
+            self.num_batches += 1
+        else:
+            self.num_batches = batch
+
+        super().step()
 
 
 class BaselineModel(pl.LightningModule):
@@ -82,11 +93,11 @@ class BaselineModel(pl.LightningModule):
         self.test_metrics = self.valid_metrics.clone(prefix="test_")
 
     def _single_step(self, batch):
-        _, _, labels = batch
+        labels = batch['labels']
         preds = self.forward(batch).view(-1)
-        
+
         # Manually disable autocast for binary_cross_entropy
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast("cuda", enabled=False):
             # Ensure preds and labels are in float32
             loss = F.binary_cross_entropy(preds.to(torch.float32), labels.to(torch.float32))
         
@@ -95,6 +106,20 @@ class BaselineModel(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         trues, preds, loss = self._single_step(batch)
         self.train_metrics.update(preds.detach(), trues.detach())
+
+        # Reset metrics every N batches
+        if (batch_idx + 1) % self.hparams.metric_reset_interval == 0:
+            result = self.train_metrics.compute()
+            self.train_metrics.reset()
+
+            self.log_dict(result, on_step=True, sync_dist=self.hparams.sync_dist)
+
+            self.log("learning_rate", self.trainer.optimizers[0].param_groups[0]['lr'],
+                    on_step=True, on_epoch=False,
+                    batch_size=self.hparams.batch_size, sync_dist=self.hparams.sync_dist)
+
+            self.log("train_loss", loss, on_step=True, sync_dist=self.hparams.sync_dist)
+
         return loss
 
     def test_step(self, batch, batch_idx):
@@ -121,21 +146,6 @@ class BaselineModel(pl.LightningModule):
         result = self.valid_metrics.compute()
         self.valid_metrics.reset()
         self.log_dict(result, on_epoch=True, sync_dist=self.hparams.sync_dist)
-
-    # def load_data(self, dataset, valid_size=0.1, indices=None):
-    #     if indices is None:
-    #         dataset_length = len(dataset)
-    #         valid_length = int(valid_size * dataset_length)
-    #         train_length = dataset_length - valid_length
-    #         self.train_set, self.val_set = data.random_split(dataset, [train_length, valid_length])
-    #         print('Data has been randomly divided into train/val sets with sizes {} and {}'.format(len(self.train_set),
-    #                                                                                                len(self.val_set)))
-    #     else:
-    #         train_indices, val_indices = indices
-    #         self.train_set = Subset(dataset, train_indices)
-    #         self.val_set = Subset(dataset, val_indices)
-    #         print('Data has been divided into train/val sets with sizes {} and {} based on selected indices'.format(
-    #             len(self.train_set), len(self.val_set)))
 
     def train_dataloader(self, train_set=None, num_workers=8, collate_fn=None, shuffle=True):
         if train_set is not None:
@@ -194,12 +204,13 @@ class BaselineModel(pl.LightningModule):
     @staticmethod
     def add_model_specific_args(parent_parser):
         parser = parent_parser.add_argument_group("Args_model")
-        parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate for training. "
+        parser.add_argument("--lr", type=float, default=2e-5, help="Learning rate for training. "
                                                                    "Cosine warmup will be applied.")
         parser.add_argument("--batch_size", type=int, default=32, help="Batch size for training/testing.")
         parser.add_argument("--max_len", type=int, default=800, help="Max sequence length.")
         parser.add_argument("--num_workers", type=int, default=8, help="Number of workers for data loading.")
         parser.add_argument("--sync_dist", type=bool, default=False, help="Synchronize distributed training.")
+        parser.add_argument("--metric_reset_interval", type=int, default=10000, help="Interval to reset metrics")
         return parent_parser
 
 
@@ -251,11 +262,19 @@ class CrossTransformerLayer(pl.LightningModule):
         self.ffn = PositionwiseFeedForward(input_dim, hidden_dim, dropout)
 
     def forward(self, x1, x2, masks=None):
-        x1_add = torch.add(x1, self.cross_attention(x1, x2, x2, mask=masks))
-        x2_add = torch.add(x2, self.cross_attention(x2, x1, x1, mask=(masks[1], masks[0])))
+        x1_add = self.cross_attention(x1, x2, x2, mask=masks)
+        x2_add = self.cross_attention(x2, x1, x1, mask=(masks[1], masks[0]))
+
+        x1_add = torch.add(x1, x1_add)
+        x2_add = torch.add(x2, x2_add)
+
         x1_ffn = self.ffn(self.norm2(x1_add))
         x2_ffn = self.ffn(self.norm2(x2_add))
-        return self.norm3(torch.add(x1_ffn, x1_add)), self.norm3(torch.add(x2_ffn, x2_add))
+
+        x1_out = self.norm3(torch.add(x1_ffn, x1_add))
+        x2_out = self.norm3(torch.add(x2_ffn, x2_add))
+
+        return x1_out, x2_out
 
 
 class SelfTransformerModule(pl.LightningModule):
@@ -349,7 +368,7 @@ class PPITransformerModel(BaselineModel):
                                                               hidden_dim=hidden_dim, 
                                                               num_layers=num_cross_layers, 
                                                               dropout=dropout,
-                                                              pooling='max',
+                                                              pooling='mean',
                                                                 precision=self.hparams.precision)
 
         self.decoder = torch.nn.Sequential(
@@ -359,10 +378,8 @@ class PPITransformerModel(BaselineModel):
         )
 
     def forward(self, batch):
-        if len(batch) == 3:
-            (x1, mask1), (x2, mask2), _ = batch
-        else:
-            (x1, mask1), (x2, mask2) = batch 
+        x1, mask1 = batch['ids1']
+        x2, mask2 = batch['ids2']
 
         x1 = self.embedding(x1)
         x2 = self.embedding(x2)
@@ -388,8 +405,9 @@ class PPITransformerModel(BaselineModel):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=0.01) #TODO: change the wd bask to 0.01
 
         lr_dict = {
-            "scheduler": CosineWarmupScheduler(optimizer=optimizer, warmup=5, max_iters=200),
+            "scheduler": CosineWarmupScheduler(optimizer=optimizer, warmup=5, max_iters=int(1e7)),
             "name": 'CosineWarmupScheduler',
+            "interval": 'step',
         }
         return [optimizer], [lr_dict]
 
@@ -410,12 +428,12 @@ if __name__ == '__main__':
     # _, tokenizer = ankh.load_base_model()
     tokenizer = PreTrainedTokenizerFast.from_pretrained("tokenizer")
 
-    # sequences = SequencesDataset(sequences_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500.fasta")
+    # sequences = SequencesDataset(sequences_path="dev.fasta")
 
-    # dataset = PairSequenceDataIterable(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_train.tsv",
-    #                             sequences_dataset=sequences, tokenizer=tokenizer, chunk_size=100000)
+    # dataset = PairSequenceData(pairs_path="dev_train.tsv",
+    #                             sequences_dataset=sequences, tokenizer=tokenizer)
 
-    # dataset_test = PairSequenceData(pairs_path="/home/volzhenin/T5-ppi/string12.0_experimental_score_500_test.tsv",
+    # dataset_test = PairSequenceData(pairs_path="dev_test.tsv",
     #                                 sequences_dataset=sequences, tokenizer=tokenizer)
 
     sequences = SequencesDataset(sequences_path="string12.0_combined_score_900.fasta")
@@ -448,8 +466,8 @@ if __name__ == '__main__':
                             num_heads=8, #8
                             dropout=0.1)
 
-    ckpt = torch.load("ppi-transformer/6qfgdx0p/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.116-val_BinaryF1Score=0.762.ckpt")
-    model.load_state_dict(ckpt['state_dict'])
+    # ckpt = torch.load("ppi-transformer/6qfgdx0p/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.107-val_BinaryF1Score=0.781.ckpt")
+    # model.load_state_dict(ckpt['state_dict'])
 
     # model.load_data(dataset=dataset, valid_size=0.01)
     shuffle_train = False if isinstance(dataset, PairSequenceDataIterable) else True
@@ -457,7 +475,7 @@ if __name__ == '__main__':
     val_set = model.val_dataloader(dataset_test, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=False)
 
     # logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
-    logger = pl.loggers.WandbLogger(project='ppi-transformer', name='AttentionModelBase')
+    logger = pl.loggers.WandbLogger(project='ppi-transformer', name='ESM2')
 
     callbacks = [
         TQDMProgressBar(refresh_rate=250),
@@ -478,8 +496,9 @@ if __name__ == '__main__':
                          max_epochs=100,
                          logger=logger, 
                          callbacks=callbacks,
-                         val_check_interval=100000,
-                         precision=params.precision)
+                         precision=params.precision,
+                         track_grad_norm=2,
+                        val_check_interval=100000)
 
     trainer.fit(model, train_set, val_set)
 

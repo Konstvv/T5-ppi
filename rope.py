@@ -151,14 +151,6 @@ class RotaryPEMultiHeadAttention(pl.LightningModule):
             mask = mask_q * mask_k
             mask = mask.permute(1, 2, 0).unsqueeze(-1)
 
-            # #print the first batch of mask, mask_q, mask_k to verify the shapes
-            # if torch.sum(mask_q[0, :, 0]) != torch.sum(mask_k[0, 0, :]):
-            #     print(mask[:, :, 0].squeeze())
-            #     print(mask_q[0, :, 0].squeeze())
-            #     print(mask_k[0, 0, :].squeeze())
-            #     print(torch.sum(mask_q[0, :, 0]), torch.sum(mask_k[0, 0, :]), torch.sum(mask[:, :, 0]))
-            #     exit()
-
         query = self.query(query)
         key = self.key(key)
         value = self.value(value)
