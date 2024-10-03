@@ -140,3 +140,12 @@ if __name__ == '__main__':
 #    test_BinaryPrecision        0.6524054408073425
 #      test_BinaryRecall         0.7106000185012817
 #          test_loss             0.19551974534988403
+
+#      test_BinaryAUROC           0.953594446182251
+#     test_BinaryAccuracy        0.9434000253677368
+# test_BinaryAveragePrecision    0.8152315616607666
+#     test_BinaryF1Score         0.7209823131561279
+# test_BinaryMatthewsCorrCoef    0.6944939494132996
+#    test_BinaryPrecision        0.6532402038574219
+#      test_BinaryRecall         0.8044000267982483
+#          test_loss             0.16178685426712036

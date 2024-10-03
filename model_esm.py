@@ -9,7 +9,7 @@ import torch.optim as optim
 import numpy as np
 import logging
 from torch.optim import Optimizer
-from dataset import PairSequenceData, SequencesDataset, PairSequenceDataIterable
+from dataset import PairSequenceData, SequencesDataset, PairSequenceDataIterable, PairSequenceDataPrecomputed
 from pytorch_lightning.callbacks import ModelCheckpoint, TQDMProgressBar, EarlyStopping
 import wandb
 from transformers import PreTrainedTokenizerFast
@@ -111,7 +111,8 @@ class PPITransformerModel(BaselineModel):
             (x1, mask1), (x2, mask2) = self.self_transformer_block(x1, x2)
         
         else:
-            raise NotImplementedError
+            x1, mask1 = batch['ids1']
+            x2, mask2 = batch['ids2']
 
         x = self.cross_transformer_block(x1, x2, (mask1, mask2))
 
@@ -123,7 +124,7 @@ class PPITransformerModel(BaselineModel):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=0.01)
 
         lr_dict = {
-            "scheduler": CosineWarmupScheduler(optimizer=optimizer, warmup=5000, max_iters=int(1e7)),
+            "scheduler": CosineWarmupScheduler(optimizer=optimizer, warmup=100, max_iters=int(1e7)),
             "name": 'CosineWarmupScheduler',
             "interval": 'step',
         }
@@ -138,8 +139,6 @@ class PPITransformerModel(BaselineModel):
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained("tokenizer")
-
     # sequences = SequencesDataset(sequences_path="dev.fasta")
 
     # dataset = PairSequenceData(pairs_path="dev_train.tsv",
@@ -148,13 +147,16 @@ if __name__ == '__main__':
     # dataset_test = PairSequenceData(pairs_path="dev_test.tsv",
     #                                 sequences_dataset=sequences, for_esm=True)
 
-    sequences = SequencesDataset(sequences_path="string12.0_combined_score_900_esm.fasta")
+    # sequences = SequencesDataset(sequences_path="string12.0_combined_score_900_esm.fasta")
 
-    dataset = PairSequenceData(pairs_path="all_900_train_shuffled.tsv",
-                                sequences_dataset=sequences, for_esm=True)#, chunk_size=100000)
+    # dataset = PairSequenceData(pairs_path="all_900_train_shuffled.tsv",
+    #                             sequences_dataset=sequences, for_esm=True)
 
-    dataset_test = PairSequenceData(pairs_path="all_900_test.tsv",
-                                    sequences_dataset=sequences, for_esm=True)
+    # dataset_test = PairSequenceData(pairs_path="all_900_test.tsv",
+    #                                 sequences_dataset=sequences, for_esm=True)
+    
+    dataset = PairSequenceDataPrecomputed(pairs_path="all_900_train_shuffled.tsv", emb_dir="esm2_embs_3B")
+    dataset_test = PairSequenceDataPrecomputed(pairs_path="all_900_test.tsv", emb_dir="esm2_embs_3B")
 
 
     parser = argparse.ArgumentParser()
@@ -162,7 +164,7 @@ if __name__ == '__main__':
     parser = pl.Trainer.add_argparse_args(parser)
     params = parser.parse_args()
 
-    params.max_len = dataset.max_len
+    params.max_len = 1000 # dataset.max_len
 
     #define sync_dist parameter for distributed training
     if 'ddp' in str(params.strategy):
@@ -170,23 +172,25 @@ if __name__ == '__main__':
         print('Distributed syncronisation is enabled')
 
     model = PPITransformerModel(params, 
-                           ntoken=len(tokenizer), 
-                           embed_dim=480, #64/ #512
-                            hidden_dim=2048, #512/ #2048
-                            num_cross_layers=6, #3
-                            num_heads=8, #8
-                            dropout=0.1)
+                           embed_dim=480,
+                            hidden_dim=2048,
+                            num_cross_layers=6,
+                            num_heads=8,
+                            dropout=0.1,
+                            precomputed_embeds=True)
 
-    # ckpt = torch.load("ppi-transformer/6qfgdx0p/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.107-val_BinaryF1Score=0.781.ckpt")
-    # model.load_state_dict(ckpt['state_dict'])
+    ckpt = torch.load("ppi-transformer/tmg60lyz/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.078-val_BinaryF1Score=0.843.ckpt")
+    for key in list(ckpt['state_dict'].keys()):
+        if key.startswith('embedding') or key.startswith('self_transformer_block'):
+            del ckpt['state_dict'][key]
+    model.load_state_dict(ckpt['state_dict'])
 
     # model.load_data(dataset=dataset, valid_size=0.01)
     shuffle_train = False if isinstance(dataset, PairSequenceDataIterable) else True
     train_set = model.train_dataloader(dataset, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=shuffle_train)
     val_set = model.val_dataloader(dataset_test, collate_fn=dataset.collate_fn, num_workers=params.num_workers, shuffle=False)
 
-    # logger = pl.loggers.TensorBoardLogger("logs", name='AttentionModelBase')
-    logger = pl.loggers.WandbLogger(project='ppi-transformer', name='ESM2')
+    logger = pl.loggers.WandbLogger(project='ppi-transformer', name='ESM2precomp')
 
     callbacks = [
         TQDMProgressBar(refresh_rate=250),
@@ -209,7 +213,8 @@ if __name__ == '__main__':
                          callbacks=callbacks,
                          precision=params.precision,
                          track_grad_norm=2,
-                         val_check_interval=100000)
+                         val_check_interval=50000,
+                         limit_val_batches=0.5)
 
     trainer.fit(model, train_set, val_set)
 
