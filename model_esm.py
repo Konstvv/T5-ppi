@@ -31,7 +31,7 @@ class ESM2Module(torch.nn.Module):
         super(ESM2Module, self).__init__()
 
         self.esm2_model, self.alphabet = pretrained.esm2_t12_35M_UR50D()
-        self.batch_converter = self.alphabet.get_batch_converter()
+        self.batch_converter = self.alphabet.get_batch_converter(truncation_seq_length=params.max_len)
 
         if torch.cuda.is_available():
             self.model_device = 'cuda'
@@ -103,7 +103,7 @@ class PPITransformerModel(BaselineModel):
             torch.nn.Sigmoid()
         )
 
-    def forward(self, batch):
+    def forward(self, batch, return_attention=False):
         
         if self.self_transformer_block is not None:
             x1 = batch['ids1']
@@ -114,11 +114,17 @@ class PPITransformerModel(BaselineModel):
             x1, mask1 = batch['ids1']
             x2, mask2 = batch['ids2']
 
-        x = self.cross_transformer_block(x1, x2, (mask1, mask2))
+        if return_attention:
+            x, (attn1, attn2) = self.cross_transformer_block(x1, x2, (mask1, mask2), return_attention=return_attention)
+        else:
+            x = self.cross_transformer_block(x1, x2, (mask1, mask2))
 
         x = self.decoder(x)
 
-        return x
+        if return_attention:
+            return x, (attn1, attn2)
+        else:
+            return x
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=0.01)
@@ -155,7 +161,7 @@ if __name__ == '__main__':
     # dataset_test = PairSequenceData(pairs_path="all_900_test.tsv",
     #                                 sequences_dataset=sequences, for_esm=True)
     
-    dataset = PairSequenceDataPrecomputed(pairs_path="all_900_train_shuffled.tsv", emb_dir="esm2_embs_3B")
+    dataset = PairSequenceDataPrecomputed(pairs_path="all_900_train_shuffled.tsv", emb_dir="esm2_embs_3B", nrows=200000000)
     dataset_test = PairSequenceDataPrecomputed(pairs_path="all_900_test.tsv", emb_dir="esm2_embs_3B")
 
 

@@ -260,10 +260,16 @@ class CrossTransformerLayer(pl.LightningModule):
         self.norm3 = torch.nn.LayerNorm(input_dim)
         self.cross_attention = MultiheadAttention(input_dim, num_heads, dropout, precision=precision)
         self.ffn = PositionwiseFeedForward(input_dim, hidden_dim, dropout)
+        
+        self.attn1 = None
+        self.attn2 = None
 
     def forward(self, x1, x2, masks=None):
         x1_add = self.cross_attention(x1, x2, x2, mask=masks)
+        self.attn1 = self.cross_attention.attn.detach()
+
         x2_add = self.cross_attention(x2, x1, x1, mask=(masks[1], masks[0]))
+        self.attn2 = self.cross_attention.attn.detach()
 
         x1_add = torch.add(x1, x1_add)
         x2_add = torch.add(x2, x2_add)
@@ -327,16 +333,23 @@ class CrossTransformerModule(pl.LightningModule):
         else:
             raise ValueError('Supported pooling methods are "mean" and "max"')
 
-    def forward(self, x1, x2, masks=None):
+    def forward(self, x1, x2, masks=None, return_attention=False):
         x1 = self.norm(x1)
         x2 = self.norm(x2)
         if self.cross_transformer_layers:
             for layer in self.cross_transformer_layers:
                 x1, x2 = layer(x1, x2, masks)
+                if return_attention:
+                    attn1 = layer.attn1
+                    attn2 = layer.attn2
 
         x = torch.cat([x1, x2], dim=1)
 
-        return self.pooling(x.permute(0, 2, 1)).squeeze()
+        x_out = self.pooling(x.permute(0, 2, 1)).squeeze()
+
+        if return_attention:
+            return x_out, (attn1, attn2)
+        return x_out
     
 
 class PPITransformerModel(BaselineModel):

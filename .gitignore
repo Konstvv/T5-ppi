@@ -162,6 +162,6 @@ cython_debug/
 wandb/
 logs/
 lightning_logs/
-esm2_emds_3B/
+esm2_embs_3B/
 *.err
 *.out
