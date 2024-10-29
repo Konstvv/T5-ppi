@@ -23,7 +23,7 @@ def add_esm_args(parent_parser):
                                                           "correct folder.")
     parser.add_argument(
         "--model_location_esm",
-        type=str, default="esm2_t12_35M_UR50D",
+        type=str, default="esm2_t36_3B_UR50D",
         # help="PyTorch model file OR name of pretrained model to download. If not default, "
         #      "the number of encoder_features has to be modified according to the embedding dimensionality. "
         help=argparse.SUPPRESS
@@ -141,4 +141,4 @@ if __name__ == "__main__":
                             help="FASTA file on which to extract the ESM2 representations and then test.",
                             )
     args = esm_parser.parse_args()
-    run(args)
+    compute_embeddings(args)

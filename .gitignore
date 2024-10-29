@@ -162,6 +162,8 @@ cython_debug/
 wandb/
 logs/
 lightning_logs/
-esm2_embs_3B/
+esm2_embs_*/
+ppi-transformer*/
+pickles/
 *.err
 *.out

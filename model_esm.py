@@ -161,7 +161,7 @@ if __name__ == '__main__':
     # dataset_test = PairSequenceData(pairs_path="all_900_test.tsv",
     #                                 sequences_dataset=sequences, for_esm=True)
     
-    dataset = PairSequenceDataPrecomputed(pairs_path="all_900_train_shuffled.tsv", emb_dir="esm2_embs_3B", nrows=200000000)
+    dataset = PairSequenceDataPrecomputed(pairs_path="all_900_train_shuffled.tsv", emb_dir="esm2_embs_3B", nrows=100000000)
     dataset_test = PairSequenceDataPrecomputed(pairs_path="all_900_test.tsv", emb_dir="esm2_embs_3B")
 
 
@@ -185,7 +185,8 @@ if __name__ == '__main__':
                             dropout=0.1,
                             precomputed_embeds=True)
 
-    ckpt = torch.load("ppi-transformer/tmg60lyz/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.078-val_BinaryF1Score=0.843.ckpt")
+    # ckpt = torch.load("ppi-transformer/tmg60lyz/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.078-val_BinaryF1Score=0.843.ckpt")
+    ckpt = torch.load("ppi-transformer/dpk8ayx7/checkpoints/chkpt_loss_based_epoch=0-val_loss=0.058-val_BinaryF1Score=0.889.ckpt")
     for key in list(ckpt['state_dict'].keys()):
         if key.startswith('embedding') or key.startswith('self_transformer_block'):
             del ckpt['state_dict'][key]
@@ -219,8 +220,7 @@ if __name__ == '__main__':
                          callbacks=callbacks,
                          precision=params.precision,
                          track_grad_norm=2,
-                         val_check_interval=50000,
-                         limit_val_batches=0.5)
+                         val_check_interval=50000)
 
     trainer.fit(model, train_set, val_set)
 

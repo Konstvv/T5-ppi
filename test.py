@@ -99,8 +99,8 @@ def get_interaction_map(pdb_file, chain_a_id='A', chain_b_id='B', distance_cutof
 
 
 if __name__ == '__main__':
-    print('Loading interaction map...')
-    int_map = get_interaction_map('7ypd.pdb')
+    # print('Loading interaction map...')
+    # int_map = get_interaction_map('7ypd.pdb')
 
     from model_esm import PPITransformerModel
     print('Loading model...')
@@ -133,6 +133,7 @@ if __name__ == '__main__':
     
     #checkpoint_folder = os.path.join('ppi-transformer/tmg60lyz', 'checkpoints')
     checkpoint_folder = os.path.join('ppi-transformer/sintk29b', 'checkpoints')
+    # checkpoint_folder = os.path.join('ppi-transformer/dpk8ayx7', 'checkpoints')
 
     checkpoint_path = os.path.join(checkpoint_folder, os.listdir(checkpoint_folder)[0])
     print('Loading model from checkpoint:', checkpoint_path)
@@ -149,102 +150,72 @@ if __name__ == '__main__':
     model_state_dict.update(ckpt['state_dict'])
     model.load_state_dict(model_state_dict)
 
-    sequences = SequencesDataset(sequences_path="../SENSE-PPI/data/idp/test.dictionary.fasta")
+    sequences = SequencesDataset(sequences_path="aphid_dev.fasta")
 
-    dataset = PairSequenceData(pairs_path="../SENSE-PPI/data/idp/test1_cleaned.actions.tsv",
+    dataset = PairSequenceData(pairs_path="aphid_dev.tsv",
                                 sequences_dataset=sequences,
                                 # tokenizer=tokenizer, 
                                 for_esm=True)
     
-    # # test_model(checkpoint_folder='logs/AttentionModelBase/version_173', dataset=dataset)
-    # test_model(model, dataset)
+    # test_model(checkpoint_folder='logs/AttentionModelBase/version_173', dataset=dataset)
+    test_model(model, dataset)
 
-    seq1 = 'MTPSATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKALPLQALAAATGKVIPVKLESANEEDAAALAKLVKEKAGKVDFLLANAGVCELNKPVLSTPSATFVDHFTVNTLGPLTLFQQFYSLLTESSSPRFFVTSSAGGSTTYVSMAPDMDLAPAYGISKAAVNHLVAHIARKFGAKDGLVAAVVHPGLVATDMTRPFLEAAGLPADGGPGFEHISPDESAAALVKIFDEAKRETHGGKFLSYDGTEIPW'
-    seq2 = 'MTPSATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKALPLQALAAATGKVIPVKLESANEEDAAALAKLVKEKAGKVDFLLANAGVCELNKPVLSTPSATFVDHFTVNTLGPLTLFQQFYSLLTESSSPRFFVTSSAGGSTTYVSMAPDMDLAPAYGISKAAVNHLVAHIARKFGAKDGLVAAVVHPGLVATDMTRPFLEAAGLPADGGPGFEHISPDESAAALVKIFDEAKRETHGGKFLSYDGTEIPW'
+    # seq1 = 'MTPSATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKALPLQALAAATGKVIPVKLESANEEDAAALAKLVKEKAGKVDFLLANAGVCELNKPVLSTPSATFVDHFTVNTLGPLTLFQQFYSLLTESSSPRFFVTSSAGGSTTYVSMAPDMDLAPAYGISKAAVNHLVAHIARKFGAKDGLVAAVVHPGLVATDMTRPFLEAAGLPADGGPGFEHISPDESAAALVKIFDEAKRETHGGKFLSYDGTEIPW'
+    # seq2 = 'MTPSATVYVISGATRGIGFALTSLLAQRDNVLIFAGARDPAKALPLQALAAATGKVIPVKLESANEEDAAALAKLVKEKAGKVDFLLANAGVCELNKPVLSTPSATFVDHFTVNTLGPLTLFQQFYSLLTESSSPRFFVTSSAGGSTTYVSMAPDMDLAPAYGISKAAVNHLVAHIARKFGAKDGLVAAVVHPGLVATDMTRPFLEAAGLPADGGPGFEHISPDESAAALVKIFDEAKRETHGGKFLSYDGTEIPW'
 
-    print(seq1)
-    print(seq2)
+    # print(seq1)
+    # print(seq2)
 
-    pred, (attn1, attn2), (tokens_seq1, tokens_seq2) = pred_model(model, seq1, seq2)
+    # pred, (attn1, attn2), (tokens_seq1, tokens_seq2) = pred_model(model, seq1, seq2)
 
-    print(pred)
+    # print(pred)
 
-    from matplotlib import pyplot as plt
-    import numpy as np
-    from mpl_toolkits.mplot3d import Axes3D
+    # from matplotlib import pyplot as plt
+    # import numpy as np
+    # from mpl_toolkits.mplot3d import Axes3D
 
-    fig, ax = plt.subplots(1, 2, figsize=(60, 40))
+    # fig, ax = plt.subplots(1, 2, figsize=(60, 40))
 
-    attn1 = attn1.numpy()
-    attn1[attn1 == 0] = np.nan
-    ax[0].imshow(attn1)
-    # the first dimantion corresponds to tokens_seq1, the second to tokens_seq2
-    ax[0].set_xticks(range(len(tokens_seq2)))
-    ax[0].set_xticklabels(tokens_seq2)
-    ax[0].set_yticks(range(len(tokens_seq1)))
-    ax[0].set_yticklabels(tokens_seq1)
+    # attn1 = attn1.numpy()
+    # attn1[attn1 == 0] = np.nan
+    # ax[0].imshow(attn1)
+    # # the first dimantion corresponds to tokens_seq1, the second to tokens_seq2
+    # ax[0].set_xticks(range(len(tokens_seq2)))
+    # ax[0].set_xticklabels(tokens_seq2)
+    # ax[0].set_yticks(range(len(tokens_seq1)))
+    # ax[0].set_yticklabels(tokens_seq1)
 
-    attn2 = attn2.numpy()
-    attn2[attn2 == 0] = np.nan
-    ax[1].imshow(attn2)
-    ax[1].set_xticks(range(len(tokens_seq1)))
-    ax[1].set_xticklabels(tokens_seq1)
-    ax[1].set_yticks(range(len(tokens_seq2)))
-    ax[1].set_yticklabels(tokens_seq2)
+    # attn2 = attn2.numpy()
+    # attn2[attn2 == 0] = np.nan
+    # ax[1].imshow(attn2)
+    # ax[1].set_xticks(range(len(tokens_seq1)))
+    # ax[1].set_xticklabels(tokens_seq1)
+    # ax[1].set_yticks(range(len(tokens_seq2)))
+    # ax[1].set_yticklabels(tokens_seq2)
 
-    plt.savefig('attn.pdf')
+    # plt.savefig('attn.pdf')
 
-    #use attn1 and plot the max value along both dimentions, create a figure with 2 plots
+    # #use attn1 and plot the max value along both dimentions, create a figure with 2 plots
 
-    attn_x = attn1.max(0)
-    attn_y = attn1.max(1)
+    # attn_x = attn1.max(0)
+    # attn_y = attn1.max(1)
 
-    fig, ax = plt.subplots(1, 2, figsize=(60, 5))
+    # fig, ax = plt.subplots(1, 2, figsize=(60, 5))
 
-    ax[0].plot(attn_x)
-    ax[1].plot(attn_y)
+    # ax[0].plot(attn_x)
+    # ax[1].plot(attn_y)
 
-    ax[0].set_xticks(range(len(tokens_seq2)))
-    ax[0].set_xticklabels(tokens_seq2)
-    ax[1].set_xticks(range(len(tokens_seq1)))
-    ax[1].set_xticklabels(tokens_seq1)
+    # ax[0].set_xticks(range(len(tokens_seq2)))
+    # ax[0].set_xticklabels(tokens_seq2)
+    # ax[1].set_xticks(range(len(tokens_seq1)))
+    # ax[1].set_xticklabels(tokens_seq1)
 
-    #plot interaction map on ax[0]
+    # #plot interaction map on ax[0]
 
-    ax[0].plot(int_map)
-    print(int_map)
-    print(len(int_map))
-    print(max(int_map))
-    print(len(attn_x))
+    # ax[0].plot(int_map)
+    # print(int_map)
+    # print(len(int_map))
+    # print(max(int_map))
+    # print(len(attn_x))
 
-    plt.savefig('attn_max.pdf')
-
-
-
-#esm2
-#     test_BinaryAUROC          0.9221996665000916
-#     test_BinaryAccuracy        0.9392727017402649
-# test_BinaryAveragePrecision    0.7358049750328064
-#     test_BinaryF1Score         0.6802603602409363
-# test_BinaryMatthewsCorrCoef    0.6474987864494324
-#    test_BinaryPrecision        0.6524054408073425
-#      test_BinaryRecall         0.7106000185012817
-#          test_loss             0.19551974534988403
-
-#      test_BinaryAUROC           0.953594446182251
-#     test_BinaryAccuracy        0.9434000253677368
-# test_BinaryAveragePrecision    0.8152315616607666
-#     test_BinaryF1Score         0.7209823131561279
-# test_BinaryMatthewsCorrCoef    0.6944939494132996
-#    test_BinaryPrecision        0.6532402038574219
-#      test_BinaryRecall         0.8044000267982483
-#          test_loss             0.16178685426712036
-
-#      test_BinaryAUROC          0.9496803879737854
-#     test_BinaryAccuracy        0.9584363698959351
-# test_BinaryAveragePrecision    0.8214950561523438
-#     test_BinaryF1Score         0.7543520331382751
-# test_BinaryMatthewsCorrCoef    0.7342249751091003
-#    test_BinaryPrecision        0.8151416778564453
-#      test_BinaryRecall         0.7020000219345093
-        #  test_loss             0.12891605496406555
+    # plt.savefig('attn_max.pdf')

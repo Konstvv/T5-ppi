@@ -141,10 +141,12 @@ class PairSequenceDataPrecomputed(Dataset):
         self.dtypes = {'seq1': str, 'seq2': str, 'label': np.int8}
         self.emb_dir = emb_dir
 
-        if nrows is None: 
-            self.data = pd.read_csv(self.pairs_path, delimiter='\t', names=["seq1", "seq2", "label"], dtype=self.dtypes)
-        else:
-            self.data = pd.read_csv(self.pairs_path, delimiter='\t', names=["seq1", "seq2", "label"], dtype=self.dtypes, nrows=nrows)
+        
+        self.data = pd.read_csv(self.pairs_path, delimiter='\t', names=["seq1", "seq2", "label"], dtype=self.dtypes)
+        
+        if nrows is not None:
+            self.data = self.data.sample(nrows)
+            
         logging.info(f"Number of pairs: {len(self.data)}")
 
         self.data['label'] = self.data['label'].astype(np.int8)
